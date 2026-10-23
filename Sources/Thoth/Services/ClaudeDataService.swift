@@ -69,6 +69,9 @@ final class ClaudeDataService {
     @ObservationIgnored private var sessionDirs: [String: String] = [:] // sessionId -> projects/<dir>
     @ObservationIgnored private var todayFileCaches: [String: TodayFileCache] = [:]
     @ObservationIgnored private var todayCacheDay: Date? = nil
+    /// Last time the today summary walked the whole projects tree; see `computeTodaySummaries`.
+    @ObservationIgnored private var todayLastWalk: Date = .distantPast
+    private static let todayWalkInterval: TimeInterval = 60
     @ObservationIgnored private var fullScanCaches: [String: FullFileCache] = [:]
     @ObservationIgnored private var heuristicGroups: [String: String] = [:] // projects/<dir> name -> group
 
@@ -561,83 +564,96 @@ final class ClaudeDataService {
     /// On each tick, we only re-read files whose mtime advanced, and only the bytes appended since the
     /// last read. This replaces the previous full-file rescan that was burning ~25 MB/s on the main
     /// thread.
+    ///
+    /// Walking and stat-ing every transcript (thousands of files on a long history) is most of a
+    /// tick's cost, so the whole tree is walked at most once per `todayWalkInterval`; ticks in
+    /// between only re-check the files already known to have been written today. A file first
+    /// written after the last walk joins today's totals at the next walk, within a minute.
     func computeTodaySummaries() {
         let projectsDir = claudeDir + "/projects"
-        guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
-
         let cal = Calendar.current
-        let todayStart = cal.startOfDay(for: Date())
+        let now = Date()
+        let todayStart = cal.startOfDay(for: now)
 
-        // Day rolled over → discard yesterday's caches.
+        // Day rolled over (or the group filter changed) → discard caches and walk again.
         if todayCacheDay != todayStart {
             todayFileCaches.removeAll()
             todayCacheDay = todayStart
+            todayLastWalk = .distantPast
+        }
+
+        var candidates: [String] = []
+        if now.timeIntervalSince(todayLastWalk) >= Self.todayWalkInterval {
+            guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
+            let groupFilter = bgSelectedGroup
+            for dir in dirs {
+                if let group = groupFilter {
+                    let decoded = ProjectGroup.decodePath(dir)
+                    let dirGroup = ProjectGroup.groupName(from: decoded)
+                    if dirGroup != group { continue }
+                }
+                candidates += enumerateJSONLs(in: projectsDir + "/" + dir)
+            }
+            todayLastWalk = now
+        } else {
+            candidates = Array(todayFileCaches.keys)
         }
 
         var seenFiles: Set<String> = []
-        let groupFilter = bgSelectedGroup
 
-        for dir in dirs {
-            if let group = groupFilter {
-                let decoded = ProjectGroup.decodePath(dir)
-                let dirGroup = ProjectGroup.groupName(from: decoded)
-                if dirGroup != group { continue }
+        for filePath in candidates {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
+                  let mtime = attrs[.modificationDate] as? Date else { continue }
+
+            // Not modified today → cannot contain today's entries.
+            if mtime < todayStart { continue }
+
+            seenFiles.insert(filePath)
+            var cache = todayFileCaches[filePath] ?? TodayFileCache()
+
+            // mtime unchanged since last read → nothing new in this file.
+            if cache.mtime == mtime { continue }
+
+            // File shrunk (rotated/truncated) → discard cache and start over.
+            let currentSize: UInt64 = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+            if currentSize < cache.cursor.offset {
+                cache = TodayFileCache()
             }
-            let dirPath = projectsDir + "/" + dir
-            for filePath in enumerateJSONLs(in: dirPath) {
-                guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
-                      let mtime = attrs[.modificationDate] as? Date else { continue }
 
-                // Not modified today → cannot contain today's entries.
-                if mtime < todayStart { continue }
-
-                seenFiles.insert(filePath)
-                var cache = todayFileCaches[filePath] ?? TodayFileCache()
-
-                // mtime unchanged since last read → nothing new in this file.
-                if cache.mtime == mtime { continue }
-
-                // File shrunk (rotated/truncated) → discard cache and start over.
-                let currentSize: UInt64 = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
-                if currentSize < cache.cursor.offset {
-                    cache = TodayFileCache()
-                }
-
-                var cursor = cache.cursor
-                autoreleasepool {
-                    readAppendedLines(of: filePath, cursor: &cursor, onContinuation: { tools in
-                        cache.pending?.tools.append(contentsOf: tools)
-                    }) { record in
-                        if record.isCorrection {
-                            // More output for the response just read: it is still `pending` (or
-                            // already summed, when it was not an assistant line).
-                            guard record.pricing != nil else { return }
-                            if let date = record.timestamp, date < todayStart { return }
-                            cache.cost += record.cost
-                            cache.tokens += record.usage.totalTokens
-                            cache.pending?.cost += record.cost
-                            cache.pending?.tokens += record.usage.totalTokens
-                            return
-                        }
-                        cache.commitPending()
+            var cursor = cache.cursor
+            autoreleasepool {
+                readAppendedLines(of: filePath, cursor: &cursor, onContinuation: { tools in
+                    cache.pending?.tools.append(contentsOf: tools)
+                }) { record in
+                    if record.isCorrection {
+                        // More output for the response just read: it is still `pending` (or
+                        // already summed, when it was not an assistant line).
                         guard record.pricing != nil else { return }
-                        // Skip entries from before today (file may straddle midnight on first scan).
                         if let date = record.timestamp, date < todayStart { return }
+                        cache.cost += record.cost
+                        cache.tokens += record.usage.totalTokens
+                        cache.pending?.cost += record.cost
+                        cache.pending?.tokens += record.usage.totalTokens
+                        return
+                    }
+                    cache.commitPending()
+                    guard record.pricing != nil else { return }
+                    // Skip entries from before today (file may straddle midnight on first scan).
+                    if let date = record.timestamp, date < todayStart { return }
 
-                        let lineCost = record.cost
-                        let tokens = record.usage.totalTokens
-                        cache.cost += lineCost
-                        cache.tokens += tokens
-                        cache.calls += 1
-                        if record.isAssistant {
-                            cache.pending = (record.toolNames, lineCost, tokens)
-                        }
+                    let lineCost = record.cost
+                    let tokens = record.usage.totalTokens
+                    cache.cost += lineCost
+                    cache.tokens += tokens
+                    cache.calls += 1
+                    if record.isAssistant {
+                        cache.pending = (record.toolNames, lineCost, tokens)
                     }
                 }
-                cache.cursor = cursor
-                cache.mtime = mtime
-                todayFileCaches[filePath] = cache
             }
+            cache.cursor = cursor
+            cache.mtime = mtime
+            todayFileCaches[filePath] = cache
         }
 
         // Drop entries for files that disappeared (deleted/moved/group-filtered out).
