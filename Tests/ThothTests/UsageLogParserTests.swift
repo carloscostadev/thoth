@@ -137,3 +137,25 @@ private func line(id: String, model: String = "claude-sonnet-5-5", block: String
     #expect(calls == 1)
     #expect(open?.usage.outputTokens == 300)
 }
+
+@Test func fileReadingReportsOnlyTheFirstCwdWhateverTheChunks() throws {
+    // A line far longer than the chunks, then a cd into another folder.
+    let long = String(repeating: "x", count: 5_000)
+    let text = #"{"type":"user","cwd":"/a/first","message":{"content":"\#(long)"}}"# + "\n"
+        + #"{"type":"user","cwd":"/a/second","message":{"content":"short"}}"# + "\n"
+        + line(id: "m1", input: 1, output: 2)
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("thoth-cwd-\(UUID().uuidString).jsonl")
+    try Data(text.utf8).write(to: url)
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    for chunkSize in [16, 333, 4_096, 1 << 20] {
+        var cursor = UsageLogCursor()
+        var cwds: [String] = []
+        var records = 0
+        UsageLogParser.parseFile(atPath: url.path, cursor: &cursor, chunkSize: chunkSize,
+                                 onCwd: { cwds.append($0) }) { _ in records += 1 }
+        #expect(cwds == ["/a/first"], "chunk \(chunkSize)")
+        #expect(records == 1)
+        #expect(cursor.offset == UInt64(text.utf8.count))
+    }
+}

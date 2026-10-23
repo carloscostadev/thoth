@@ -97,12 +97,13 @@ enum UsageLogParser {
 
     /// Reads `path` from `cursor.offset` to the end in fixed-size chunks (memory stays bounded by
     /// the chunk size plus the longest line, whatever the file size) and parses every complete
-    /// line, advancing `cursor`. Returns the number of bytes read, or nil if the file can't be read.
+    /// line, advancing `cursor`. `onCwd` gets the first cwd read, at most once per call.
+    /// Returns the number of bytes read, or nil if the file can't be read.
     @discardableResult
     static func parseFile(
         atPath path: String,
         cursor: inout UsageLogCursor,
-        chunkSize: Int = 4 << 20,
+        chunkSize: Int = 256 << 10,
         onCwd: ((String) -> Void)? = nil,
         onContinuation: ((_ toolNames: [String]) -> Void)? = nil,
         onRecord: (UsageRecord) -> Void
@@ -114,6 +115,13 @@ enum UsageLogParser {
         var bytesRead: UInt64 = 0
         var carry = Data()
         var reachedEnd = false
+        // Only the file's first cwd is reported: once found, later chunks skip the search (and
+        // the decoding of a whole line, which can be megabytes long).
+        var cwdFound = false
+        let reportCwd: (String) -> Void = { cwd in
+            cwdFound = true
+            onCwd?(cwd)
+        }
         while !reachedEnd {
             // FileHandle hands back autoreleased buffers; drain them per chunk, or a whole file
             // accumulates until the caller's pool pops.
@@ -123,6 +131,12 @@ enum UsageLogParser {
                     return
                 }
                 bytesRead += UInt64(chunk.count)
+                // Still inside a line longer than a chunk: keep it growing without rescanning or
+                // copying what is already carried (both would be quadratic in the line length).
+                if !carry.isEmpty, !containsNewline(chunk) {
+                    carry.append(chunk)
+                    return
+                }
                 let buffer: Data
                 if carry.isEmpty {
                     buffer = chunk
@@ -130,13 +144,25 @@ enum UsageLogParser {
                     carry.append(chunk)
                     buffer = carry
                 }
-                let consumed = parse(buffer, open: &cursor.open, onCwd: onCwd,
+                let consumed = parse(buffer, open: &cursor.open,
+                                     onCwd: onCwd == nil || cwdFound ? nil : reportCwd,
                                      onContinuation: onContinuation, onRecord: onRecord)
                 cursor.offset += UInt64(consumed)
-                carry = consumed == buffer.count ? Data() : Data(buffer.dropFirst(consumed))
+                if consumed == buffer.count {
+                    carry = Data()
+                } else if consumed > 0 || carry.isEmpty {
+                    carry = Data(buffer.dropFirst(consumed))
+                }
             }
         }
         return bytesRead
+    }
+
+    private static func containsNewline(_ data: Data) -> Bool {
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return false }
+            return memchr(base, 0x0A, raw.count) != nil
+        }
     }
 
     // MARK: - Line handling
