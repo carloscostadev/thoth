@@ -4,7 +4,7 @@
 [![Downloads](https://img.shields.io/github/downloads/carloscostadev/thoth/total)](https://github.com/carloscostadev/thoth/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey)
-![Swift](https://img.shields.io/badge/swift-5.9-orange)
+![Swift](https://img.shields.io/badge/swift-6-orange)
 
 Named after Thoth, the Egyptian god of writing and measure.
 
@@ -19,34 +19,42 @@ from `~/.claude/`.
 
 1. Download from [Releases](https://github.com/carloscostadev/thoth/releases/latest)
 2. Drag `Thoth.app` to `/Applications`
-3. Right-click the app and pick **Open** once to bypass Gatekeeper
+3. Open it once and allow it in **System Settings > Privacy & Security >
+   Open Anyway** (see [Install](#install))
 4. Click the icon in the menu bar
 
 ## Features
 
-- **Today, this week, this month, all time.** Cost, calls and tokens for each
-  window, all on one screen.
-- **Live burn rate.** Tokens/second with activity states: Sleeping, Light,
+- **Today, 7, 15 and 30 days, all time.** Cost, calls and tokens for each
+  window, all on one screen. Rolling windows count today as day one.
+- **Live burn rate.** Tokens/second with activity states: Sleeping, Idle,
   Active, Sprinting.
 - **Activity breakdown.** What you're actually doing today (Conversation,
   Coding, Exploration, Terminal, Planning, Design), classified from the tools
   used in each assistant turn.
-- **Model breakdown.** Per-model cost and token share (Opus, Sonnet, Haiku)
-  with up-to-date pricing including `claude-opus-4-7`.
+- **Model breakdown.** Per-model cost and token share (Fable, Mythos, Opus,
+  Sonnet, Haiku), priced with a built-in copy of Anthropic's API list prices
+  (last checked 2026-10-23, Claude 5 family included). A model version newer
+  than the table uses the closest known version of its family until the app
+  is updated. Costs are API-equivalent estimates, not what a Claude
+  subscription bills you.
 - **Trends tab.** Last-30-days daily cost chart, projected month-end cost and
   prompt-cache savings.
 - **Projects tab.** Top projects by cost (resolved from each session's `cwd`,
   not just the encoded folder name), plus a weekday × hour heatmap of when
   you burn the most.
-- **Project filter.** Slice every number by a single project.
+- **Project filter (not in the UI yet).** The data layer can slice every
+  number by project group, but the picker isn't wired into the popover.
 - **Launch at login.** Optional, toggled from the popover.
 
 ## How it works
 
 Claude Code writes one JSONL file per session under
-`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. Thoth watches that
-tree and the `~/.claude/sessions/*.json` heartbeats, aggregates every
-`message.usage` block it finds, and prices it against a built-in rate card.
+`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. Thoth polls that
+tree and the `~/.claude/sessions/*.json` heartbeats, aggregates the
+`message.usage` of every API response, and prices it against a built-in rate
+card. Claude Code writes one line per content block and repeats the same
+usage on each, so every response is counted once.
 
 To stay cheap on a large history (the author's local tree is ~450 MB across
 ~600 files), scanning is layered:
@@ -60,10 +68,12 @@ To stay cheap on a large history (the author's local tree is ~450 MB across
   being re-parsed. Period buckets (week / 15d / month) are derived from a
   per-day breakdown at aggregation time, so the calendar can advance without
   invalidating caches. Switching the project filter is aggregation-time too,
-  so it doesn't re-read any files.
+  so it doesn't re-read any files. On a cold start, files are parsed in
+  parallel.
 
-All file I/O and JSON parsing happens on a dedicated serial dispatch queue;
-the main thread is reserved for SwiftUI updates.
+Files are read in fixed-size chunks and only lines carrying `usage` are
+JSON-decoded. All file I/O and parsing is driven from a dedicated background
+queue; the main thread is reserved for SwiftUI updates.
 
 ## Install
 
@@ -71,8 +81,12 @@ Download `Thoth-<version>-mac.zip` from
 [Releases](https://github.com/carloscostadev/thoth/releases), unzip it, and
 drag `Thoth.app` to `/Applications`.
 
-The first launch is quarantined by Gatekeeper because the binary isn't
-notarised. Right-click the app and pick **Open** once to bypass it.
+The app isn't notarised, so Gatekeeper blocks the first launch. On macOS 15
+and later, open it once, then go to **System Settings > Privacy & Security**
+and click **Open Anyway** next to the Thoth message (right-click > Open no
+longer bypasses the check). On macOS 14, right-click the app and pick
+**Open** once instead. Alternatively, remove the quarantine flag yourself:
+`xattr -dr com.apple.quarantine /Applications/Thoth.app`.
 
 ## Development
 
@@ -83,14 +97,20 @@ open Package.swift
 # Or build and run from the terminal
 ./scripts/dev.sh
 
-# Build a release .app bundle into build/
+# Build a release .app bundle (universal: arm64 + x86_64) into build/
 ./scripts/build.sh
+
+# Run the tests
+swift test
+
+# Optional: benchmark the scans on a large synthetic history (temp dir)
+THOTH_BENCH=1 swift test -c release -Xswiftc -enable-testing --filter ScanBenchmark
 ```
 
 ## Requirements
 
 - macOS 14.0+
-- Xcode 15+ (for development)
+- Xcode 16+ / Swift 6 toolchain (for development; the tests use swift-testing)
 
 ## License
 
