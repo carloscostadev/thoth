@@ -1,7 +1,10 @@
 import Foundation
 
 enum LaunchAtLogin {
-    private static let plistName = "com.carloscosta.thoth.plist"
+    // Per-bundle label, so a side-by-side build ("Thoth Design") never replaces the
+    // stable app's login item.
+    private static let label = Bundle.main.bundleIdentifier ?? "com.carloscosta.thoth"
+    private static let plistName = label + ".plist"
 
     private static var plistPath: String {
         let home = NSHomeDirectory()
@@ -30,7 +33,7 @@ enum LaunchAtLogin {
         try? FileManager.default.createDirectory(atPath: launchAgentsDir, withIntermediateDirectories: true)
 
         let plist: [String: Any] = [
-            "Label": "com.carloscosta.thoth",
+            "Label": label,
             "ProgramArguments": [appPath + "/Contents/MacOS/Thoth"],
             "RunAtLoad": true,
             "KeepAlive": false,
