@@ -85,7 +85,7 @@ final class ClaudeDataService {
         var mtime: Date = .distantPast
         var size: UInt64 = 0
         var groupKey: String = ""
-        var modelTokens: [String: (input: Int, output: Int, cacheWrite: Int, cacheRead: Int)] = [:]
+        var modelTokens: [String: (input: Int, output: Int, cacheWrite: Int, cacheRead: Int, cost: Double)] = [:]
         var sessionModels: Set<String> = []
         var perDay: [Date: (cost: Double, tokens: Int, calls: Int)] = [:]
         var heat: [[Double]] = Array(repeating: Array(repeating: 0.0, count: 24), count: 7)
@@ -226,7 +226,7 @@ final class ClaudeDataService {
                     cacheWriteTokens: tokens.cacheWrite,
                     cacheReadTokens: tokens.cacheRead
                 )
-                aggregator.add(usage: usage, model: model)
+                aggregator.add(usage: usage, cost: tokens.cost, model: model)
             }
             for model in cache.sessionModels {
                 aggregator.incrementSessionCount(for: model)
@@ -341,12 +341,14 @@ final class ClaudeDataService {
                 let outputTokens = usageDict["output_tokens"] as? Int ?? 0
                 let cacheWrite = usageDict["cache_creation_input_tokens"] as? Int ?? 0
                 let cacheRead = usageDict["cache_read_input_tokens"] as? Int ?? 0
+                let cacheWrite1h = (usageDict["cache_creation"] as? [String: Any])?["ephemeral_1h_input_tokens"] as? Int ?? 0
 
                 let usage = TokenUsage(
                     inputTokens: inputTokens,
                     outputTokens: outputTokens,
                     cacheWriteTokens: cacheWrite,
-                    cacheReadTokens: cacheRead
+                    cacheReadTokens: cacheRead,
+                    cacheWrite1hTokens: cacheWrite1h
                 )
                 let cost = usage.cost(for: model)
                 let toks = usage.totalTokens
@@ -361,9 +363,10 @@ final class ClaudeDataService {
                     existing.output += outputTokens
                     existing.cacheWrite += cacheWrite
                     existing.cacheRead += cacheRead
+                    existing.cost += cost
                     cache.modelTokens[model] = existing
                 } else {
-                    cache.modelTokens[model] = (inputTokens, outputTokens, cacheWrite, cacheRead)
+                    cache.modelTokens[model] = (inputTokens, outputTokens, cacheWrite, cacheRead, cost)
                 }
 
                 cache.totalCacheRead += cacheRead
@@ -561,12 +564,14 @@ final class ClaudeDataService {
                     let outputTokens = usageDict["output_tokens"] as? Int ?? 0
                     let cacheWrite = usageDict["cache_creation_input_tokens"] as? Int ?? 0
                     let cacheRead = usageDict["cache_read_input_tokens"] as? Int ?? 0
+                    let cacheWrite1h = (usageDict["cache_creation"] as? [String: Any])?["ephemeral_1h_input_tokens"] as? Int ?? 0
 
                     let usage = TokenUsage(
                         inputTokens: inputTokens,
                         outputTokens: outputTokens,
                         cacheWriteTokens: cacheWrite,
-                        cacheReadTokens: cacheRead
+                        cacheReadTokens: cacheRead,
+                        cacheWrite1hTokens: cacheWrite1h
                     )
                     let lineCost = usage.cost(for: model)
                     cache.cost += lineCost
@@ -657,12 +662,14 @@ final class ClaudeDataService {
             let outputTokens = usageDict["output_tokens"] as? Int ?? 0
             let cacheWrite = usageDict["cache_creation_input_tokens"] as? Int ?? 0
             let cacheRead = usageDict["cache_read_input_tokens"] as? Int ?? 0
+            let cacheWrite1h = (usageDict["cache_creation"] as? [String: Any])?["ephemeral_1h_input_tokens"] as? Int ?? 0
 
             let usage = TokenUsage(
                 inputTokens: inputTokens,
                 outputTokens: outputTokens,
                 cacheWriteTokens: cacheWrite,
-                cacheReadTokens: cacheRead
+                cacheReadTokens: cacheRead,
+                cacheWrite1hTokens: cacheWrite1h
             )
             results.append((usage, model))
         }

@@ -18,7 +18,7 @@ struct ModelsTabView: View {
 
     private func modelRow(_ entry: ModelUsageEntry) -> some View {
         let percentage = totalCost > 0 ? entry.totalCost / totalCost * 100 : 0
-        let color = modelColor(entry.modelId)
+        let color = modelColor(entry.family)
 
         return VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -59,11 +59,14 @@ struct ModelsTabView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private func modelColor(_ modelId: String) -> Color {
-        if modelId.contains("opus") { return .pink }
-        if modelId.contains("sonnet") { return .blue }
-        if modelId.contains("haiku") { return .green }
-        return .gray
+    private func modelColor(_ family: ModelFamily?) -> Color {
+        switch family {
+        case .opus: return .pink
+        case .sonnet: return .blue
+        case .haiku: return .green
+        case .fable, .mythos: return .purple
+        case nil: return .gray
+        }
     }
 
     private func formatTokens(_ count: Int) -> String {
