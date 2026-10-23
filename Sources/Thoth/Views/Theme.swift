@@ -290,14 +290,6 @@ extension View {
     }
 }
 
-// MARK: - Instance name
-
-enum AppInstance {
-    /// Bundle display name, so a side-by-side build (e.g. "Thoth Design") is recognisable.
-    static var name: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Thoth"
-    }
-}
 
 // MARK: - Adaptive colors
 

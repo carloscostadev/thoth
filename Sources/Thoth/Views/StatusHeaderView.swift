@@ -14,7 +14,7 @@ struct StatusHeaderView: View {
                 Image(systemName: "gauge.open.with.lines.needle.33percent")
                     .font(Theme.Font.title)
                     .foregroundStyle(Theme.Palette.textPrimary)
-                Text(AppInstance.name)
+                Text("Thoth")
                     .font(Theme.Font.title)
                     .foregroundStyle(Theme.Palette.textPrimary)
                 Spacer()
