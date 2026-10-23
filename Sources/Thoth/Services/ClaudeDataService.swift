@@ -110,6 +110,9 @@ final class ClaudeDataService {
     private struct FullFileCache {
         var mtime: Date = .distantPast
         var size: UInt64 = 0
+        /// Inode and read position: a file that only grew is read from `cursor` on the next scan.
+        var fileNumber: UInt64 = 0
+        var cursor = UsageLogCursor()
         var cwd: String?
         var heuristicGroup: String = ""
         var modelTokens: [String: (input: Int, output: Int, cacheWrite: Int, cacheRead: Int, cost: Double)] = [:]
@@ -194,8 +197,9 @@ final class ClaudeDataService {
     /// Incremental heavy scan. Per-file aggregates are cached keyed by path; files whose
     /// (mtime, size) haven't changed are skipped without any I/O. The selectedGroup filter
     /// is applied at aggregation time, so switching groups no longer invalidates caches.
-    /// First-run still reads everything once; subsequent runs only touch files that grew
-    /// or rotated. Runs on analyticsQueue.
+    /// First-run still reads everything once; subsequent runs read only what was appended to
+    /// files that grew, and re-read whole only files that were replaced or shrank.
+    /// Runs on analyticsQueue.
     func unifiedFullScan() {
         let projectsDir = claudeDir + "/projects"
         guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
@@ -230,11 +234,17 @@ final class ClaudeDataService {
                 guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
                       let mtime = attrs[.modificationDate] as? Date else { continue }
                 let size: UInt64 = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+                let fileNumber: UInt64 = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
 
-                if let cached = fullScanCaches[filePath], cached.mtime == mtime, cached.size == size {
+                let cached = fullScanCaches[filePath]
+                if let cached, cached.mtime == mtime, cached.size == size {
                     continue
                 }
-                jobs.append(FullScanJob(path: filePath, mtime: mtime, heuristicGroup: heuristicGroupName))
+                // Claude Code only appends to a transcript: the same file, not smaller, carries on
+                // from where the last scan stopped.
+                let base = cached.flatMap { $0.fileNumber == fileNumber && size >= $0.size ? $0 : nil }
+                jobs.append(FullScanJob(path: filePath, mtime: mtime, fileNumber: fileNumber,
+                                        heuristicGroup: heuristicGroupName, base: base))
             }
         }
 
@@ -386,25 +396,34 @@ final class ClaudeDataService {
     private struct FullScanJob {
         let path: String
         let mtime: Date
+        let fileNumber: UInt64
         let heuristicGroup: String
+        /// Aggregate of the file's start, read by an earlier scan.
+        let base: FullFileCache?
     }
 
-    /// Parses a whole JSONL file into its time-independent aggregate, plus the read position the
-    /// active-session poll should continue from. Pure function of the file: safe to run
-    /// concurrently. Returns nil if the file can't be read.
+    /// Parses a JSONL file into its time-independent aggregate, plus the read position the
+    /// active-session poll should continue from: from the end of `job.base` when the file still
+    /// has a line break there, else from the start. Pure function of the file and `job`: safe to
+    /// run concurrently. Returns nil if the file can't be read.
     private static func buildFullFileCache(_ job: FullScanJob,
                                            calendar cal: Calendar) -> (cache: FullFileCache, cursor: UsageLogCursor)? {
         var cache = FullFileCache()
+        if let base = job.base, endsLine(atPath: job.path, offset: base.cursor.offset) {
+            cache = base
+        }
         cache.mtime = job.mtime
-        var fileCwd: String? = nil
-        var cursor = UsageLogCursor()
+        cache.fileNumber = job.fileNumber
+        var fileCwd = cache.cwd
+        var cursor = cache.cursor
+        let start = cursor.offset
         // Calendar lookups are the hot spot after JSON decoding; every zone offset is a multiple
         // of 15 minutes, so one lookup per quarter hour gives the same day / weekday / hour.
         var buckets: [Int: (day: Date, weekday: Int, hour: Int)] = [:]
 
         // The parser looks for a cwd again in every chunk it reads; the session's first one wins.
-        let bytesRead = UsageLogParser.parseFile(atPath: job.path, cursor: &cursor,
-                                                 onCwd: { if fileCwd == nil { fileCwd = $0 } }) { record in
+        let onCwd: ((String) -> Void)? = fileCwd == nil ? { if fileCwd == nil { fileCwd = $0 } } : nil
+        let bytesRead = UsageLogParser.parseFile(atPath: job.path, cursor: &cursor, onCwd: onCwd) { record in
             guard let d = record.timestamp, let pricing = record.pricing else { return }
             let usage = record.usage
             let cost = record.cost
@@ -456,11 +475,23 @@ final class ClaudeDataService {
         guard let bytesRead else { return nil }
 
         // Size of what was actually read: if the file grew meanwhile, the next scan sees a
-        // different size and re-parses it.
-        cache.size = bytesRead
+        // different size and reads the rest.
+        cache.size = start + bytesRead
+        cache.cursor = cursor
         cache.cwd = fileCwd
         cache.heuristicGroup = job.heuristicGroup
         return (cache, cursor)
+    }
+
+    /// True when the byte before `offset` is a line break (or `offset` is 0): the file still
+    /// looks like the one whose first `offset` bytes were read.
+    private static func endsLine(atPath path: String, offset: UInt64) -> Bool {
+        guard offset > 0 else { return true }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        guard (try? handle.seek(toOffset: offset - 1)) != nil,
+              let byte = try? handle.read(upToCount: 1) else { return false }
+        return byte.first == 0x0A
     }
 
     // MARK: - Sessions

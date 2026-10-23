@@ -195,6 +195,127 @@ struct ScanCorrectnessTests {
         #expect(abs(service.projectRanking.reduce(0) { $0 + $1.cost } - service.allTimeCost) < 1e-9 * service.allTimeCost)
     }
 
+    /// Everything the full scan publishes, for comparing two services.
+    private func expectSameScan(_ a: ClaudeDataService, _ b: ClaudeDataService) {
+        func close(_ x: Double, _ y: Double) -> Bool { abs(x - y) <= 1e-9 * max(abs(x), abs(y), 1) }
+        #expect(a.allTimeCalls == b.allTimeCalls)
+        #expect(a.allTimeTokens == b.allTimeTokens)
+        #expect(close(a.allTimeCost, b.allTimeCost))
+        #expect(a.weekCalls == b.weekCalls && a.fifteenDaysCalls == b.fifteenDaysCalls && a.monthCalls == b.monthCalls)
+        #expect(close(a.weekCost, b.weekCost) && close(a.monthCost, b.monthCost))
+        #expect(a.weekTokens == b.weekTokens && a.monthTokens == b.monthTokens)
+        let rows = { (s: ClaudeDataService) in s.modelUsage.entries.sorted { $0.modelId < $1.modelId } }
+        #expect(rows(a).map(\.modelId) == rows(b).map(\.modelId))
+        for (x, y) in zip(rows(a), rows(b)) {
+            #expect(x.inputTokens == y.inputTokens && x.outputTokens == y.outputTokens)
+            #expect(x.cacheWriteTokens == y.cacheWriteTokens && x.cacheReadTokens == y.cacheReadTokens)
+            #expect(x.sessionCount == y.sessionCount)
+            #expect(close(x.totalCost, y.totalCost))
+        }
+        #expect(a.dailyCostSeries.map(\.date) == b.dailyCostSeries.map(\.date))
+        #expect(a.dailyCostSeries.map(\.tokens) == b.dailyCostSeries.map(\.tokens))
+        #expect(zip(a.dailyCostSeries, b.dailyCostSeries).allSatisfy { close($0.cost, $1.cost) })
+        #expect(zip(a.heatmap.joined(), b.heatmap.joined()).allSatisfy { close($0, $1) })
+        #expect(a.projectRanking.map(\.name) == b.projectRanking.map(\.name))
+        #expect(close(a.cacheSavings, b.cacheSavings) && close(a.cacheHitRate, b.cacheHitRate))
+    }
+
+    private func coldScan(_ root: URL) async -> ClaudeDataService {
+        let cold = ClaudeDataService(claudeDir: root.path)
+        cold.unifiedFullScan()
+        await drainMainQueue()
+        return cold
+    }
+
+    @Test func fullScanReadsOnlyWhatGrewAndMatchesAColdScan() async throws {
+        var history = try SyntheticHistory(models: Self.models, seed: 13)
+        defer { history.remove() }
+        try history.generate(projects: 3, filesPerProject: 3, messagesPerFile: 30, todayShare: 0.5)
+
+        let service = ClaudeDataService(claudeDir: history.root.path)
+        service.unifiedFullScan()
+        for _ in 0..<3 {
+            try history.append(messages: 7, toFiles: 4)
+            service.unifiedFullScan()
+        }
+        await drainMainQueue()
+
+        let requests = priced(history.requests)
+        #expect(service.allTimeCalls == requests.count)
+        #expect(service.allTimeTokens == requests.reduce(0) { $0 + $1.totalTokens })
+        expectSameScan(service, await coldScan(history.root))
+    }
+
+    @Test func fullScanJoinsAResponseSplitBetweenScans() async throws {
+        let history = try SyntheticHistory(models: [], seed: 1)
+        defer { history.remove() }
+        let dir = history.projectsDir.appendingPathComponent("-srv-Documents-Acme-app")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("session.jsonl")
+        let ts = SyntheticHistory.timestamp(Date())
+        func line(_ id: String, output: Int) -> String {
+            #"{"type":"assistant","cwd":"/srv/Documents/Acme/app","timestamp":"\#(ts)","message":{"id":"\#(id)","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":1000,"output_tokens":\#(output),"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#
+                + "\n"
+        }
+        var mtime = Date()
+        func append(_ text: String) throws {
+            if !FileManager.default.fileExists(atPath: file.path) {
+                FileManager.default.createFile(atPath: file.path, contents: nil)
+            }
+            let h = try FileHandle(forWritingTo: file)
+            try h.seekToEnd()
+            try h.write(contentsOf: Data(text.utf8))
+            try h.close()
+            mtime = mtime.addingTimeInterval(1)
+            try FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: file.path)
+        }
+
+        let service = ClaudeDataService(claudeDir: history.root.path)
+        let a2 = line("msg_a", output: 3000)
+        let half = a2.index(a2.startIndex, offsetBy: a2.count / 2)
+        try append(line("msg_a", output: 100) + a2[..<half])
+        service.unifiedFullScan()
+        try append(String(a2[half...]) + line("msg_b", output: 50))
+        service.unifiedFullScan()
+        try append(line("msg_b", output: 500))
+        service.unifiedFullScan()
+        await drainMainQueue()
+
+        #expect(service.allTimeCalls == 2)
+        #expect(service.allTimeTokens == 2 * 1000 + 3000 + 500)
+        #expect(abs(service.allTimeCost - (2000 * 4.0 + 3500 * 20.0) / 1_000_000) < 1e-12)
+        expectSameScan(service, await coldScan(history.root))
+    }
+
+    @Test func fullScanRereadsReplacedOrRewrittenFiles() async throws {
+        var history = try SyntheticHistory(models: Self.models, seed: 17)
+        defer { history.remove() }
+        try history.generate(projects: 1, filesPerProject: 2, messagesPerFile: 20, todayShare: 1)
+        let service = ClaudeDataService(claudeDir: history.root.path)
+        service.unifiedFullScan()
+
+        // Replaced by a longer file (new inode), as an editor or a sync tool would.
+        let replaced = history.files[0].url
+        let original = try Data(contentsOf: replaced)
+        let other = try Data(contentsOf: history.files[1].url)
+        try (other + other).write(to: replaced, options: .atomic)
+        // Rewritten in place (same inode), longer, without a line break where the last read ended.
+        let rewritten = history.files[1].url
+        let readUpTo = other.count
+        let handle = try FileHandle(forWritingTo: rewritten)
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: Data(String(repeating: "x", count: readUpTo).utf8) + Data("\n".utf8) + original)
+        try handle.close()
+        let later = Date().addingTimeInterval(5)
+        for url in [replaced, rewritten] {
+            try FileManager.default.setAttributes([.modificationDate: later], ofItemAtPath: url.path)
+        }
+
+        service.unifiedFullScan()
+        await drainMainQueue()
+        expectSameScan(service, await coldScan(history.root))
+    }
+
     @Test func projectDirNameMatchesClaudeCodeEncoding() {
         #expect(ClaudeDataService.projectDirName(forCwd: "/home/dev/Documents/Acme/app") == "-home-dev-Documents-Acme-app")
         #expect(ClaudeDataService.projectDirName(forCwd: "/a/My Project_v1.2") == "-a-My-Project-v1-2")
