@@ -18,38 +18,39 @@ struct SummaryRowsView: View {
     let allTimeTokens: Int
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            SectionHeader("Periods")
+                .padding(.bottom, Theme.Spacing.xxs)
             summaryRow(label: "Today", cost: todayCost, calls: todayCalls, tokens: todayTokens)
-            Divider().padding(.horizontal, 16)
+            ThemeDivider()
             summaryRow(label: "7 Days", cost: weekCost, calls: weekCalls, tokens: weekTokens)
-            Divider().padding(.horizontal, 16)
+            ThemeDivider()
             summaryRow(label: "15 Days", cost: fifteenDaysCost, calls: fifteenDaysCalls, tokens: fifteenDaysTokens)
-            Divider().padding(.horizontal, 16)
+            ThemeDivider()
             summaryRow(label: "30 Days", cost: monthCost, calls: monthCalls, tokens: monthTokens)
-            Divider().padding(.horizontal, 16)
+            ThemeDivider()
             summaryRow(label: "All Time", cost: allTimeCost, calls: allTimeCalls, tokens: allTimeTokens)
         }
     }
 
     private func summaryRow(label: String, cost: String, calls: Int, tokens: Int) -> some View {
-        HStack {
+        HStack(alignment: .firstTextBaseline) {
             Text(label)
-                .font(.system(.body, design: .monospaced).bold())
-                .foregroundStyle(.white)
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Palette.textPrimary)
 
             Spacer()
 
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(cost)
-                    .font(.system(.body, design: .monospaced).bold())
-                    .foregroundStyle(.orange)
-                Text("\(ClaudeDataService.formatTokens(tokens)) tok · \(ClaudeDataService.formatCalls(calls)) calls")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
+            Text("\(ClaudeDataService.formatTokens(tokens)) tok · \(ClaudeDataService.formatCalls(calls)) calls")
+                .font(Theme.Font.captionNumber)
+                .foregroundStyle(Theme.Palette.textTertiary)
+
+            Text(cost)
+                .font(Theme.Font.number)
+                .foregroundStyle(Theme.Palette.cost)
+                .frame(minWidth: 72, alignment: .trailing)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, Theme.Spacing.xs + 1)
         .contentShape(Rectangle())
     }
 }

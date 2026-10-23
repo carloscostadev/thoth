@@ -5,58 +5,68 @@ struct StatusHeaderView: View {
     let burnRate: String
     let isConnected: Bool
     let todayCost: String
+    let todayTokens: Int
+    let todayCalls: Int
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Thoth")
-                    .font(.headline)
-                    .foregroundStyle(.white)
+        VStack(spacing: Theme.Spacing.md) {
+            HStack(spacing: Theme.Spacing.sm) {
+                Image(systemName: "gauge.open.with.lines.needle.33percent")
+                    .font(Theme.Font.title)
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                Text(AppInstance.name)
+                    .font(Theme.Font.title)
+                    .foregroundStyle(Theme.Palette.textPrimary)
                 Spacer()
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(isConnected ? .green : .red)
-                        .frame(width: 8, height: 8)
-                    Text(isConnected ? "Connected" : "No Sessions")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                ThemeChip(
+                    text: isConnected ? "Connected" : "No Sessions",
+                    dot: Theme.connectionColor(isConnected)
+                )
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
 
-            HStack(spacing: 12) {
-                Text(activityState.emoji)
-                    .font(.system(size: 32))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(activityState.rawValue)
-                        .font(.title3.bold())
-                        .foregroundStyle(activityStateColor)
-                    Text("\(burnRate) - \(activityState.description)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                HStack(alignment: .firstTextBaseline) {
+                    ThemeLabel("Today · Cost")
+                    Spacer()
+                    ThemeChip(
+                        text: activityState.rawValue,
+                        dot: Theme.color(for: activityState),
+                        textColor: Theme.Palette.textPrimary
+                    )
+                    .help(activityState.description)
                 }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("Today")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(todayCost)
-                        .font(.system(.body, design: .monospaced).bold())
-                        .foregroundStyle(.orange)
+
+                Text(todayCost)
+                    .font(Theme.Font.hero)
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                    .contentTransition(.numericText())
+
+                HStack(spacing: 0) {
+                    metric(label: "Tokens", value: ClaudeDataService.formatTokens(todayTokens))
+                    metricDivider
+                    metric(label: "Calls", value: ClaudeDataService.formatCalls(todayCalls))
+                    metricDivider
+                    metric(label: "Burn", value: burnRate)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 12)
+            .themeCard(.hero, padding: Theme.Spacing.xl)
         }
     }
 
-    private var activityStateColor: Color {
-        switch activityState {
-        case .sleep: return .gray
-        case .idle: return .blue
-        case .active: return .orange
-        case .sprint: return .yellow
+    private var metricDivider: some View {
+        Rectangle()
+            .fill(Theme.Palette.border)
+            .frame(width: Theme.Size.hairline, height: Theme.Spacing.xxl)
+            .padding(.horizontal, Theme.Spacing.md)
+    }
+
+    private func metric(label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+            ThemeLabel(label)
+            Text(value)
+                .font(Theme.Font.number)
+                .foregroundStyle(Theme.Palette.textPrimary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

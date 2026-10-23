@@ -17,17 +17,20 @@ struct PopoverView: View {
                 activityState: service.activityState,
                 burnRate: service.formattedBurnRate,
                 isConnected: service.isConnected,
-                todayCost: service.formattedTodayCost
+                todayCost: service.formattedTodayCost,
+                todayTokens: service.todayTokens,
+                todayCalls: service.todayCalls
             )
+            .padding(.horizontal, Theme.Spacing.lg)
+            .padding(.top, Theme.Spacing.md)
 
             TabBarView(selected: $selectedTab)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-
-            Divider().padding(.horizontal, 16)
+                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.top, Theme.Spacing.md)
+                .padding(.bottom, Theme.Spacing.sm)
 
             ScrollView {
-                VStack(spacing: 0) {
+                VStack(spacing: Theme.Spacing.sm) {
                     switch selectedTab {
                     case .overview:
                         OverviewTabView(service: service)
@@ -37,57 +40,73 @@ struct PopoverView: View {
                         ProjectsTabView(service: service)
                     }
                 }
+                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.bottom, Theme.Spacing.md)
             }
-            .frame(maxHeight: 560)
+            .frame(maxHeight: Theme.Size.contentMaxHeight)
 
-            Divider().padding(.horizontal, 16)
+            ThemeDivider()
 
-            HStack {
-                Toggle("Abrir ao iniciar", isOn: Binding(
-                    get: { LaunchAtLogin.isEnabled },
-                    set: { LaunchAtLogin.isEnabled = $0 }
-                ))
-                .toggleStyle(.checkbox)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                Spacer()
-                Button("Quit") {
-                    NSApplication.shared.terminate(nil)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .font(.caption)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            FooterView()
+                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.vertical, Theme.Spacing.sm)
         }
-        .frame(width: 400)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(width: Theme.Size.popoverWidth)
+        .background(Theme.Palette.background)
     }
 }
 
 struct TabBarView: View {
     @Binding var selected: PopoverTab
+    @Namespace private var selection
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Theme.Spacing.xxs) {
             ForEach(PopoverTab.allCases) { tab in
+                let isSelected = selected == tab
                 Button {
-                    selected = tab
+                    withAnimation(.snappy(duration: 0.2)) { selected = tab }
                 } label: {
                     Text(tab.rawValue)
-                        .font(.system(.caption, design: .monospaced).bold())
-                        .foregroundStyle(selected == tab ? .white : .secondary)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(selected == tab ? Color.white.opacity(0.12) : Color.clear)
-                        )
+                        .font(Theme.Font.tab)
+                        .foregroundStyle(isSelected ? Theme.Palette.textPrimary : Theme.Palette.textTertiary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, Theme.Spacing.xs + Theme.Spacing.xxs)
+                        .background {
+                            if isSelected {
+                                Capsule()
+                                    .fill(Theme.Palette.surfaceRaised)
+                                    .matchedGeometryEffect(id: "tab", in: selection)
+                            }
+                        }
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
             }
+        }
+        .padding(Theme.Spacing.xs)
+        .background(Capsule().fill(Theme.Palette.surface))
+        .overlay(Capsule().strokeBorder(Theme.Palette.border, lineWidth: Theme.Size.hairline))
+    }
+}
+
+struct FooterView: View {
+    var body: some View {
+        HStack {
+            Toggle("Abrir ao iniciar", isOn: Binding(
+                get: { LaunchAtLogin.isEnabled },
+                set: { LaunchAtLogin.isEnabled = $0 }
+            ))
+            .toggleStyle(.checkbox)
+            .font(Theme.Font.caption)
+            .foregroundStyle(Theme.Palette.textSecondary)
             Spacer()
+            Button {
+                NSApplication.shared.terminate(nil)
+            } label: {
+                ThemeChip(text: "Quit")
+            }
+            .buttonStyle(.plain)
         }
     }
 }
@@ -96,24 +115,11 @@ struct OverviewTabView: View {
     let service: ClaudeDataService
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: Theme.Spacing.sm) {
             if !service.todayActivity.sortedEntries.isEmpty {
                 ActivitySectionView(entries: service.todayActivity.sortedEntries)
-                    .padding(.vertical, 8)
-                Divider().padding(.horizontal, 16)
+                    .themeCard()
             }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Models - All Time")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-                ModelsTabView(entries: service.modelUsage.entries)
-                    .padding(.bottom, 4)
-            }
-
-            Divider().padding(.horizontal, 16)
 
             SummaryRowsView(
                 todayCost: service.formattedTodayCost,
@@ -132,6 +138,13 @@ struct OverviewTabView: View {
                 allTimeCalls: service.allTimeCalls,
                 allTimeTokens: service.allTimeTokens
             )
+            .themeCard()
+
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                SectionHeader("Models · All Time")
+                ModelsTabView(entries: service.modelUsage.entries)
+            }
+            .themeCard()
         }
     }
 }

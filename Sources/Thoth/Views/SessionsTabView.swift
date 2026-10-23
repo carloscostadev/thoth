@@ -4,45 +4,45 @@ struct SessionsTabView: View {
     let sessions: [SessionData]
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: Theme.Spacing.sm) {
             if sessions.isEmpty {
                 Text("No active sessions")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
                     .frame(maxWidth: .infinity)
-                    .padding(20)
+                    .padding(Theme.Spacing.xl)
             } else {
                 ForEach(sessions) { session in
                     sessionRow(session)
                 }
             }
         }
-        .padding(.horizontal, 16)
     }
 
     private func sessionRow(_ session: SessionData) -> some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
+            Circle()
+                .fill(Theme.Palette.positive)
+                .frame(width: Theme.Size.dot, height: Theme.Size.dot)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 Text(session.projectName)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.white)
+                    .font(Theme.Font.bodyEmphasis)
+                    .foregroundStyle(Theme.Palette.textPrimary)
                 Text(session.projectGroup)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
             }
             Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("PID \(session.pid)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .trailing, spacing: Theme.Spacing.xxs) {
                 Text(formatDuration(session.duration))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.number)
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                Text("PID \(session.pid)")
+                    .font(Theme.Font.captionNumber)
+                    .foregroundStyle(Theme.Palette.textTertiary)
             }
         }
-        .padding(10)
-        .background(.white.opacity(0.03))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .themeCard(padding: Theme.Spacing.sm + Theme.Spacing.xxs)
     }
 
     private func formatDuration(_ interval: TimeInterval) -> String {

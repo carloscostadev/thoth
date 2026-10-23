@@ -4,17 +4,12 @@ struct ProjectsTabView: View {
     let service: ClaudeDataService
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: Theme.Spacing.sm) {
             ProjectRankingView(ranking: service.projectRanking)
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-
-            Divider().padding(.horizontal, 16)
+                .themeCard()
 
             HeatmapView(matrix: service.heatmap, maxValue: service.heatmapMax)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .themeCard()
         }
     }
 }
@@ -27,49 +22,49 @@ struct ProjectRankingView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Top Projetos · All Time")
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            SectionHeader("Top Projetos · All Time")
 
             if ranking.isEmpty {
                 Text("Sem dados.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
             } else {
-                ForEach(Array(ranking.prefix(8).enumerated()), id: \.offset) { _, item in
-                    projectRow(name: item.name, cost: item.cost)
+                ForEach(Array(ranking.prefix(8).enumerated()), id: \.offset) { index, item in
+                    projectRow(rank: index + 1, name: item.name, cost: item.cost)
                 }
             }
         }
     }
 
-    private func projectRow(name: String, cost: Double) -> some View {
+    private func projectRow(rank: Int, name: String, cost: Double) -> some View {
         let pct = total > 0 ? cost / total : 0
-        return VStack(alignment: .leading, spacing: 3) {
-            HStack {
-                Text(name)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Spacer()
-                Text(String(format: "$%.2f", cost))
-                    .font(.system(.caption, design: .monospaced).bold())
-                    .foregroundStyle(.orange)
-            }
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(.white.opacity(0.08))
-                        .frame(height: 4)
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.orange)
-                        .frame(width: geo.size.width * CGFloat(pct), height: 4)
+        return HStack(alignment: .center, spacing: Theme.Spacing.sm) {
+            Text(String(format: "%02d", rank))
+                .font(Theme.Font.captionNumber)
+                .foregroundStyle(rank == 1 ? Theme.Palette.textPrimary : Theme.Palette.textTertiary)
+                .frame(width: 18, alignment: .leading)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                HStack {
+                    Text(name)
+                        .font(Theme.Font.body)
+                        .foregroundStyle(Theme.Palette.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Text(String(format: "%.0f%%", pct * 100))
+                        .font(Theme.Font.captionNumber)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                    Text(String(format: "$%.2f", cost))
+                        .font(Theme.Font.number)
+                        .foregroundStyle(Theme.Palette.cost)
                 }
+                ThemeBar(fraction: pct,
+                         color: rank == 1 ? Theme.Palette.textPrimary : Theme.Palette.textTertiary,
+                         height: Theme.Size.thinBarHeight)
             }
-            .frame(height: 4)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, Theme.Spacing.xxs)
     }
 }
 
@@ -80,30 +75,27 @@ struct HeatmapView: View {
     private let weekdays = ["M", "T", "W", "T", "F", "S", "S"]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Heatmap · hora × dia (all time)")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                Spacer()
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            SectionHeader(title: "Heatmap · hora × dia") {
+                legend
             }
 
             GeometryReader { geo in
                 let labelWidth: CGFloat = 14
-                let gap: CGFloat = 1
-                let cellW = max(4, (geo.size.width - labelWidth - gap * 23) / 24)
+                let gap: CGFloat = 2
+                let cellW = max(4, (geo.size.width - labelWidth - gap * 24) / 24)
                 VStack(alignment: .leading, spacing: gap) {
                     ForEach(0..<7, id: \.self) { day in
                         HStack(spacing: gap) {
                             Text(weekdays[day])
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(.secondary)
+                                .font(Theme.Font.microNumber)
+                                .foregroundStyle(Theme.Palette.textTertiary)
                                 .frame(width: labelWidth, alignment: .leading)
                             ForEach(0..<24, id: \.self) { hour in
                                 let v = matrix[day][hour]
                                 let intensity = maxValue > 0 ? v / maxValue : 0
-                                RoundedRectangle(cornerRadius: 2)
-                                    .fill(cellColor(intensity))
+                                RoundedRectangle(cornerRadius: Theme.Radius.bar)
+                                    .fill(Theme.heat(intensity))
                                     .frame(width: cellW, height: cellW)
                             }
                         }
@@ -111,20 +103,29 @@ struct HeatmapView: View {
                     HStack(spacing: gap) {
                         Spacer().frame(width: labelWidth)
                         ForEach([0, 6, 12, 18], id: \.self) { hour in
-                            Text("\(hour)")
-                                .font(.system(size: 8, design: .monospaced))
-                                .foregroundStyle(.secondary)
+                            Text("\(hour)h")
+                                .font(Theme.Font.microNumber)
+                                .foregroundStyle(Theme.Palette.textTertiary)
                                 .frame(width: cellW * 6 + gap * 5, alignment: .leading)
                         }
                     }
                 }
             }
-            .frame(height: 7 * 14 + 18)
+            .frame(height: 7 * 14 + 14)
         }
     }
 
-    private func cellColor(_ intensity: Double) -> Color {
-        if intensity <= 0 { return Color.white.opacity(0.04) }
-        return Color.orange.opacity(0.2 + min(intensity, 1) * 0.8)
+    private var legend: some View {
+        HStack(spacing: Theme.Spacing.xxs) {
+            Text("LESS")
+            ForEach([0.0, 0.25, 0.5, 0.75, 1.0], id: \.self) { step in
+                RoundedRectangle(cornerRadius: Theme.Radius.bar)
+                    .fill(Theme.heat(step))
+                    .frame(width: 8, height: 8)
+            }
+            Text("MORE")
+        }
+        .font(Theme.Font.microNumber)
+        .foregroundStyle(Theme.Palette.textTertiary)
     }
 }

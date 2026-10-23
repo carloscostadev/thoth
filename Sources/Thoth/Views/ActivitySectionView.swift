@@ -8,45 +8,40 @@ struct ActivitySectionView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Activity - Today")
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 4)
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            SectionHeader("Activity · Today")
 
             ForEach(entries) { entry in
                 activityRow(entry)
             }
         }
-        .padding(.horizontal, 16)
     }
 
     private func activityRow(_ entry: ActivityEntry) -> some View {
-        HStack(spacing: 8) {
-            // Color bar proportional to cost
-            GeometryReader { geo in
-                let fraction = maxCost > 0 ? entry.cost / maxCost : 0
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(entry.category.color)
-                    .frame(width: max(geo.size.width * fraction, 4))
-            }
-            .frame(width: 60, height: 12)
+        let color = Theme.color(for: entry.category)
+        let fraction = maxCost > 0 ? entry.cost / maxCost : 0
+
+        return HStack(spacing: Theme.Spacing.sm) {
+            Circle()
+                .fill(color)
+                .frame(width: Theme.Size.dot, height: Theme.Size.dot)
 
             Text(entry.category.rawValue)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.white)
-                .frame(width: 90, alignment: .leading)
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Palette.textPrimary)
+                .frame(width: 92, alignment: .leading)
 
-            Spacer()
+            ThemeBar(fraction: fraction, color: color)
 
             Text(String(format: "$%.2f", entry.cost))
-                .font(.system(.caption, design: .monospaced).bold())
-                .foregroundStyle(.white)
+                .font(Theme.Font.number)
+                .foregroundStyle(Theme.Palette.textPrimary)
+                .frame(width: 64, alignment: .trailing)
 
             Text("\(entry.turns) turns")
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 60, alignment: .trailing)
+                .font(Theme.Font.captionNumber)
+                .foregroundStyle(Theme.Palette.textTertiary)
+                .frame(width: 58, alignment: .trailing)
         }
         .frame(height: 20)
     }

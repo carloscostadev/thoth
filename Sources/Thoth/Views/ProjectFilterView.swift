@@ -14,6 +14,8 @@ struct ProjectFilterView: View {
                 }
             }
             .pickerStyle(.menu)
+            .font(Theme.Font.body)
+            .tint(Theme.Palette.accent)
             .frame(maxWidth: .infinity)
         }
     }

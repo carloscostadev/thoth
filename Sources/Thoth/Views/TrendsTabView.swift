@@ -4,15 +4,11 @@ struct TrendsTabView: View {
     let service: ClaudeDataService
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: Theme.Spacing.sm) {
             DailyCostChartView(series: service.dailyCostSeries)
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
+                .themeCard()
 
-            Divider().padding(.horizontal, 16)
-
-            HStack(spacing: 10) {
+            HStack(spacing: Theme.Spacing.sm) {
                 MetricCardView(
                     title: "Projeção Mês",
                     value: String(format: "$%.2f", service.projectedMonthCost),
@@ -24,26 +20,19 @@ struct TrendsTabView: View {
                     subtitle: "cache / (cache + paid)"
                 )
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
 
-            Divider().padding(.horizontal, 16)
-
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Poupança Cache")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                    Text(String(format: "$%.2f", service.cacheSavings))
-                        .font(.system(.title3, design: .monospaced).bold())
-                        .foregroundStyle(.green)
-                    Text("vs pricing sem cache (all time)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                SectionHeader(title: "Poupança Cache") {
+                    ThemeChip(text: "All Time", dot: Theme.Palette.positive)
                 }
-                Spacer()
+                Text(String(format: "$%.2f", service.cacheSavings))
+                    .font(Theme.Font.metric)
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                Text("vs pricing sem cache")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
             }
-            .padding(16)
+            .themeCard()
         }
     }
 }
@@ -66,54 +55,67 @@ struct DailyCostChartView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Custo diário · 30d")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if let idx = selectedIndex, idx < series.count {
-                    let point = series[idx]
-                    Text("\(longDate(point.date))  ·  \(String(format: "$%.2f", point.cost))  ·  \(ClaudeDataService.formatTokens(point.tokens)) tok")
-                        .font(.system(.caption, design: .monospaced).bold())
-                        .foregroundStyle(.orange)
-                } else {
-                    Text(String(format: "Σ $%.2f", total))
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            SectionHeader(title: "Custo diário · 30d") {
+                Text(String(format: "Σ $%.2f", total))
+                    .font(Theme.Font.captionNumber)
+                    .foregroundStyle(Theme.Palette.textSecondary)
             }
 
+            Group {
+                if let idx = selectedIndex, idx < series.count {
+                    let point = series[idx]
+                    HStack(spacing: Theme.Spacing.sm) {
+                        Text(String(format: "$%.2f", point.cost))
+                            .font(Theme.Font.number)
+                            .foregroundStyle(Theme.Palette.cost)
+                        Text("\(longDate(point.date)) · \(ClaudeDataService.formatTokens(point.tokens)) tok")
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                    }
+                } else {
+                    Text("Clica numa barra para ver o dia")
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                }
+            }
+            .frame(height: 16, alignment: .leading)
+
             GeometryReader { geo in
-                let barWidth = max(2, (geo.size.width - CGFloat(series.count - 1) * 2) / CGFloat(max(series.count, 1)))
-                HStack(alignment: .bottom, spacing: 2) {
+                let gap: CGFloat = 2
+                let barWidth = max(2, (geo.size.width - CGFloat(series.count - 1) * gap) / CGFloat(max(series.count, 1)))
+                HStack(alignment: .bottom, spacing: gap) {
                     ForEach(Array(series.enumerated()), id: \.offset) { index, point in
                         let h = CGFloat(point.cost / maxCost) * geo.size.height
                         let isSelected = selectedIndex == index
                         Button {
                             selectedIndex = (selectedIndex == index) ? nil : index
                         } label: {
-                            RoundedRectangle(cornerRadius: 2)
-                                .fill(point.cost > 0
-                                      ? (isSelected ? Color.white : Color.orange)
-                                      : Color.white.opacity(0.06))
-                                .frame(width: barWidth, height: max(h, 1))
+                            RoundedRectangle(cornerRadius: Theme.Radius.bar)
+                                .fill(barColor(cost: point.cost, isSelected: isSelected))
+                                .frame(width: barWidth, height: max(h, 2))
+                                .frame(maxHeight: .infinity, alignment: .bottom)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .help("\(longDate(point.date)) — \(String(format: "$%.2f", point.cost)) — \(ClaudeDataService.formatTokens(point.tokens)) tok")
                     }
                 }
             }
-            .frame(height: 80)
+            .frame(height: Theme.Size.chartHeight)
 
             HStack {
                 Text(shortDate(series.first?.date))
                 Spacer()
                 Text(shortDate(series.last?.date))
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
+            .font(Theme.Font.micro)
+            .foregroundStyle(Theme.Palette.textTertiary)
         }
+    }
+
+    private func barColor(cost: Double, isSelected: Bool) -> Color {
+        Theme.chartBar(hasValue: cost > 0, isSelected: isSelected, isDimmed: selectedIndex != nil)
     }
 
     private func shortDate(_ date: Date?) -> String {
@@ -136,20 +138,15 @@ struct MetricCardView: View {
     let subtitle: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            ThemeLabel(title)
             Text(value)
-                .font(.system(.title3, design: .monospaced).bold())
-                .foregroundStyle(.orange)
+                .font(Theme.Font.metric)
+                .foregroundStyle(Theme.Palette.textPrimary)
             Text(subtitle)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.micro)
+                .foregroundStyle(Theme.Palette.textTertiary)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(.white.opacity(0.03))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .themeCard()
     }
 }

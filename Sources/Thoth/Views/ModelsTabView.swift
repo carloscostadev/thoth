@@ -8,64 +8,39 @@ struct ModelsTabView: View {
     }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: Theme.Spacing.md) {
             ForEach(entries.sorted(by: { $0.totalCost > $1.totalCost })) { entry in
                 modelRow(entry)
             }
         }
-        .padding(.horizontal, 16)
     }
 
     private func modelRow(_ entry: ModelUsageEntry) -> some View {
         let percentage = totalCost > 0 ? entry.totalCost / totalCost * 100 : 0
-        let color = modelColor(entry.family)
+        let color = Theme.color(for: entry.family)
 
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Circle().fill(color).frame(width: 8, height: 8)
+        return VStack(alignment: .leading, spacing: Theme.Spacing.xs + 1) {
+            HStack(spacing: Theme.Spacing.sm) {
+                Circle()
+                    .fill(color)
+                    .frame(width: Theme.Size.dot, height: Theme.Size.dot)
                 Text(entry.displayName)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.white)
-                Spacer()
-                Text(String(format: "$%.2f", entry.totalCost))
-                    .font(.system(.body, design: .monospaced).bold())
-                    .foregroundStyle(.white)
-            }
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(.white.opacity(0.1))
-                        .frame(height: 6)
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(color)
-                        .frame(width: geo.size.width * min(percentage / 100, 1.0), height: 6)
-                }
-            }
-            .frame(height: 6)
-
-            HStack {
-                Text("\(formatTokens(entry.totalTokens)) tokens · \(entry.sessionCount) sessions")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.bodyEmphasis)
+                    .foregroundStyle(Theme.Palette.textPrimary)
                 Spacer()
                 Text(String(format: "%.0f%%", percentage))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.captionNumber)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                Text(String(format: "$%.2f", entry.totalCost))
+                    .font(Theme.Font.number)
+                    .foregroundStyle(Theme.Palette.textPrimary)
             }
-        }
-        .padding(10)
-        .background(.white.opacity(0.03))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
 
-    private func modelColor(_ family: ModelFamily?) -> Color {
-        switch family {
-        case .opus: return .pink
-        case .sonnet: return .blue
-        case .haiku: return .green
-        case .fable, .mythos: return .purple
-        case nil: return .gray
+            ThemeBar(fraction: percentage / 100, color: color)
+
+            Text("\(formatTokens(entry.totalTokens)) tokens · \(entry.sessionCount) sessions")
+                .font(Theme.Font.captionNumber)
+                .foregroundStyle(Theme.Palette.textTertiary)
         }
     }
 
