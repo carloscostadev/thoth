@@ -130,9 +130,20 @@ final class ClaudeDataService {
     private let analyticsQueue = DispatchQueue(label: "com.carloscosta.thoth.analytics", qos: .utility)
 
     private let claudeDir: String
+    /// Day boundaries, windows and the heatmap follow this calendar's time zone (the system's
+    /// unless a test pins one) and this clock.
+    private let currentCalendar: () -> Calendar
+    private let clock: () -> Date
+    private var calendar: Calendar { currentCalendar() }
+    /// Zone the per-day buckets in `fullScanCaches` were computed in.
+    @ObservationIgnored private var fullScanTimeZone: TimeZone?
 
-    init(claudeDir: String = NSHomeDirectory() + "/.claude") {
+    init(claudeDir: String = NSHomeDirectory() + "/.claude",
+         calendar: @escaping () -> Calendar = { .current },
+         now: @escaping () -> Date = Date.init) {
         self.claudeDir = claudeDir
+        self.currentCalendar = calendar
+        self.clock = now
     }
 
     /// Main thread. Safe to call more than once (the menu bar label's onAppear can fire again);
@@ -189,7 +200,15 @@ final class ClaudeDataService {
         let projectsDir = claudeDir + "/projects"
         guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
 
-        let cal = Calendar.current
+        let cal = calendar
+        let now = clock()
+
+        // Per-file day buckets are frozen in the zone they were computed in; after a time zone
+        // change, re-parse everything once so days and hours follow the new zone.
+        if fullScanTimeZone != cal.timeZone {
+            fullScanCaches.removeAll()
+            fullScanTimeZone = cal.timeZone
+        }
 
         // Pass 1: find files that changed since their cached aggregate.
         var seenFiles: Set<String> = []
@@ -253,7 +272,7 @@ final class ClaudeDataService {
         // Pass 2: aggregate from caches. Filter by selectedGroup at this stage.
         // Each window counts today as its first day, so "7 Days" is today plus the 6 days before
         // (same convention as the 30-day window and chart).
-        let today = cal.startOfDay(for: Date())
+        let today = cal.startOfDay(for: now)
         let weekStart = cal.date(byAdding: .day, value: -6, to: today)!
         let fifteenStart = cal.date(byAdding: .day, value: -14, to: today)!
         let windowStart = cal.date(byAdding: .day, value: -29, to: today)!
@@ -331,8 +350,8 @@ final class ClaudeDataService {
         }
 
         let last7 = series.suffix(7).map { $0.cost }.reduce(0, +) / 7.0
-        let monthRange = cal.range(of: .day, in: .month, for: Date()) ?? 1..<31
-        let dayOfMonth = cal.component(.day, from: Date())
+        let monthRange = cal.range(of: .day, in: .month, for: now) ?? 1..<31
+        let dayOfMonth = cal.component(.day, from: now)
         let remaining = max(0, monthRange.upperBound - dayOfMonth - 1)
         let projection = monthToDate + last7 * Double(remaining)
 
@@ -585,8 +604,8 @@ final class ClaudeDataService {
     /// written after the last walk joins today's totals at the next walk, within a minute.
     func computeTodaySummaries() {
         let projectsDir = claudeDir + "/projects"
-        let cal = Calendar.current
-        let now = Date()
+        let cal = calendar
+        let now = clock()
         let todayStart = cal.startOfDay(for: now)
 
         // Day rolled over (or the group filter changed) → discard caches and walk again.
