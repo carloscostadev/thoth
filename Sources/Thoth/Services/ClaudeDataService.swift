@@ -74,6 +74,8 @@ final class ClaudeDataService {
     private static let todayWalkInterval: TimeInterval = 60
     @ObservationIgnored private var fullScanCaches: [String: FullFileCache] = [:]
     @ObservationIgnored private var heuristicGroups: [String: String] = [:] // projects/<dir> name -> group
+    /// Session cwd -> ranking group, rebuilt whenever a new cwd shows up (see `ProjectGroup.Resolver`).
+    @ObservationIgnored private var cwdGroups: [String: String] = [:]
 
     private struct TodayFileCache {
         var mtime: Date = .distantPast
@@ -102,12 +104,14 @@ final class ClaudeDataService {
     /// Per-file aggregate for the heavy scan. Stores only time-independent counts
     /// (totals, per-day buckets, heat by weekday × hour). Period buckets (week/15d/month)
     /// are derived from `perDay` at aggregation time, so they update with the calendar
-    /// without requiring re-parse. Group filtering is also aggregation-time — `groupKey`
-    /// is resolved from the file's `cwd` (or path heuristic) and frozen in the cache.
+    /// without requiring re-parse. Group filtering is also aggregation-time: the group is resolved
+    /// from the session's first `cwd` (or the folder-name heuristic) when aggregating, because a
+    /// worktree's group depends on the other folders in the history.
     private struct FullFileCache {
         var mtime: Date = .distantPast
         var size: UInt64 = 0
-        var groupKey: String = ""
+        var cwd: String?
+        var heuristicGroup: String = ""
         var modelTokens: [String: (input: Int, output: Int, cacheWrite: Int, cacheRead: Int, cost: Double)] = [:]
         var sessionModels: Set<String> = []
         var perDay: [Date: (cost: Double, tokens: Int, calls: Int)] = [:]
@@ -239,6 +243,13 @@ final class ClaudeDataService {
             pollCursors.removeValue(forKey: key)
         }
 
+        // Worktrees and scratch folders join the project they belong to.
+        let cwds = Set(fullScanCaches.values.compactMap(\.cwd))
+        if cwds.count != cwdGroups.count || !cwds.allSatisfy({ cwdGroups[$0] != nil }) {
+            let resolver = ProjectGroup.Resolver(cwds: cwds)
+            cwdGroups = Dictionary(uniqueKeysWithValues: cwds.map { ($0, resolver.groupName(forCwd: $0)) })
+        }
+
         // Pass 2: aggregate from caches. Filter by selectedGroup at this stage.
         // Each window counts today as its first day, so "7 Days" is today plus the 6 days before
         // (same convention as the 30-day window and chart).
@@ -268,7 +279,8 @@ final class ClaudeDataService {
         let groupFilter = bgSelectedGroup
 
         for (_, cache) in fullScanCaches {
-            if let group = groupFilter, cache.groupKey != group { continue }
+            let groupKey = cache.cwd.flatMap { cwdGroups[$0] } ?? cache.heuristicGroup
+            if let group = groupFilter, groupKey != group { continue }
 
             totalC += cache.totalCost
             totalT += cache.totalTokens
@@ -303,7 +315,7 @@ final class ClaudeDataService {
             totalCacheRead += cache.totalCacheRead
             totalInput += cache.totalInput
             savings += cache.savings
-            projectCosts[cache.groupKey, default: 0] += cache.totalCost
+            projectCosts[groupKey, default: 0] += cache.totalCost
 
             for weekday in 0..<7 {
                 for hour in 0..<24 {
@@ -328,7 +340,7 @@ final class ClaudeDataService {
         let hitRate = denom > 0 ? Double(totalCacheRead) / denom : 0
         let ranking = projectCosts
             .map { (name: $0.key, cost: $0.value) }
-            .sorted { $0.cost > $1.cost }
+            .sorted { $0.cost != $1.cost ? $0.cost > $1.cost : $0.name < $1.name }
         let heatMax = heat.flatMap { $0 }.max() ?? 0
 
         DispatchQueue.main.async { [weak self] in
@@ -371,8 +383,9 @@ final class ClaudeDataService {
         // of 15 minutes, so one lookup per quarter hour gives the same day / weekday / hour.
         var buckets: [Int: (day: Date, weekday: Int, hour: Int)] = [:]
 
+        // The parser looks for a cwd again in every chunk it reads; the session's first one wins.
         let bytesRead = UsageLogParser.parseFile(atPath: job.path, cursor: &cursor,
-                                                 onCwd: { fileCwd = $0 }) { record in
+                                                 onCwd: { if fileCwd == nil { fileCwd = $0 } }) { record in
             guard let d = record.timestamp, let pricing = record.pricing else { return }
             let usage = record.usage
             let cost = record.cost
@@ -426,7 +439,8 @@ final class ClaudeDataService {
         // Size of what was actually read: if the file grew meanwhile, the next scan sees a
         // different size and re-parses it.
         cache.size = bytesRead
-        cache.groupKey = fileCwd.map(ProjectGroup.groupName(fromRealPath:)) ?? job.heuristicGroup
+        cache.cwd = fileCwd
+        cache.heuristicGroup = job.heuristicGroup
         return (cache, cursor)
     }
 

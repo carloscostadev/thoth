@@ -161,6 +161,40 @@ struct ScanCorrectnessTests {
         #expect(service.burnRateTracker.currentRate > 0)
     }
 
+    @Test func projectRankingJoinsWorktreesToTheirProject() async throws {
+        let base = "/srv/synthetic/Documents"
+        let cwds = [
+            "\(base)/Internal - Dev",                     // parent folder
+            "\(base)/Internal - Dev/site",                // project inside it
+            "/srv/synthetic/Library/Application Support/Horus/parallel-worktrees/site-d9470035/horus-conversa-0a1b2c3d-task",
+            "\(base)/Acme/app",
+            "\(base)/Acme/app/.claude/worktrees/feature-x",
+            "/private/tmp/claude-501/-srv-synthetic-Documents-Acme-app/441215ec-fa16-4c61-9222-046e26d390cf/scratchpad",
+        ]
+        var history = try SyntheticHistory(models: ["claude-opus-5-5", "claude-sonnet-5-5"], seed: 5)
+        defer { history.remove() }
+        try history.generate(projects: cwds.count, filesPerProject: 2, messagesPerFile: 15, cwds: cwds)
+
+        let service = ClaudeDataService(claudeDir: history.root.path)
+        service.unifiedFullScan()
+        await drainMainQueue()
+
+        // Per-file cost, by the group of the project the file's cwd belongs to.
+        var expected: [String: Double] = [:]
+        let perFile = 15
+        for (index, file) in history.files.enumerated() {
+            let group = file.cwd.contains("Acme") ? "Acme" : "Internal - Dev"
+            let requests = history.requests[(index * perFile)..<((index + 1) * perFile)]
+            expected[group, default: 0] += requests.reduce(0.0) { $0 + cost($1) }
+        }
+        #expect(service.projectRanking.map(\.name) == ["Acme", "Internal - Dev"]
+                || service.projectRanking.map(\.name) == ["Internal - Dev", "Acme"])
+        for row in service.projectRanking {
+            #expect(abs(row.cost - expected[row.name, default: -1]) < 1e-9 * max(row.cost, 1))
+        }
+        #expect(abs(service.projectRanking.reduce(0) { $0 + $1.cost } - service.allTimeCost) < 1e-9 * service.allTimeCost)
+    }
+
     @Test func projectDirNameMatchesClaudeCodeEncoding() {
         #expect(ClaudeDataService.projectDirName(forCwd: "/home/dev/Documents/Acme/app") == "-home-dev-Documents-Acme-app")
         #expect(ClaudeDataService.projectDirName(forCwd: "/a/My Project_v1.2") == "-a-My-Project-v1-2")

@@ -62,11 +62,13 @@ struct SyntheticHistory {
 
     /// Creates `projects × filesPerProject` session files with `messagesPerFile` responses each.
     /// `todayShare` of the files hold today's activity; the rest are spread over the last 60 days.
+    /// `cwds`, when given, names each project's working directory instead.
     mutating func generate(projects: Int, filesPerProject: Int, messagesPerFile: Int,
-                           todayShare: Double = 0.1, cwdBase: String = "/srv/synthetic/Documents") throws {
+                           todayShare: Double = 0.1, cwdBase: String = "/srv/synthetic/Documents",
+                           cwds: [String]? = nil) throws {
         let now = Date()
         for p in 0..<projects {
-            let cwd = "\(cwdBase)/Group\(p % 5)/project-\(p)"
+            let cwd = cwds?[p] ?? "\(cwdBase)/Group\(p % 5)/project-\(p)"
             let dir = projectsDir.appendingPathComponent(Self.encode(cwd: cwd))
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             for f in 0..<filesPerProject {
