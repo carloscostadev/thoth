@@ -54,8 +54,12 @@ jobs:
               ICON_KEY=""
           fi
 
-          # Extract version from tag
+          # Extract version from tag; it must match the VERSION file used by scripts/build.sh
           VERSION=${GITHUB_REF_NAME#v}
+          if [ "$VERSION" != "$(tr -d '[:space:]' < VERSION)" ]; then
+              echo "Tag $GITHUB_REF_NAME does not match VERSION file ($(cat VERSION))" >&2
+              exit 1
+          fi
 
           cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
           <?xml version="1.0" encoding="UTF-8"?>

@@ -5,13 +5,16 @@ APP_NAME="Thoth"
 BUILD_DIR="build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 ICON_SRC="icon/icon_1024.png"
+# Single source for the app version; the release workflow checks the tag against it.
+VERSION="${VERSION:-$(tr -d '[:space:]' < VERSION)}"
+ZIP_PATH="$BUILD_DIR/$APP_NAME-$VERSION-mac.zip"
 
 # Universal (Apple silicon + Intel) by default; e.g. ARCHS=arm64 for a faster local build.
 ARCHS="${ARCHS:-arm64 x86_64}"
 ARCH_FLAGS=()
 for arch in $ARCHS; do ARCH_FLAGS+=(--arch "$arch"); done
 
-echo "Building $APP_NAME (release, $ARCHS)..."
+echo "Building $APP_NAME $VERSION (release, $ARCHS)..."
 swift build -c release "${ARCH_FLAGS[@]}"
 
 BIN_PATH=$(swift build -c release "${ARCH_FLAGS[@]}" --show-bin-path)
@@ -55,9 +58,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
     <key>CFBundleIdentifier</key>
     <string>com.carloscosta.thoth</string>
     <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+    <string>$VERSION</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>$VERSION</string>
     <key>CFBundleExecutable</key>
     <string>$APP_NAME</string>
     <key>LSMinimumSystemVersion</key>
@@ -71,6 +74,10 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
+rm -f "$ZIP_PATH"
+ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+
 echo ""
 echo "Built successfully: $APP_BUNDLE"
+echo "Release zip: $ZIP_PATH"
 echo "To install: cp -R $APP_BUNDLE /Applications/"
