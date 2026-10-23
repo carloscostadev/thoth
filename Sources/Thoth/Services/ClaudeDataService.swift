@@ -228,13 +228,9 @@ final class ClaudeDataService {
             }
 
             let dirPath = projectsDir + "/" + dir
-            for filePath in enumerateJSONLs(in: dirPath) {
+            for file in listJSONLs(in: dirPath) {
+                let filePath = file.path, mtime = file.mtime, size = file.size, fileNumber = file.fileNumber
                 seenFiles.insert(filePath)
-
-                guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
-                      let mtime = attrs[.modificationDate] as? Date else { continue }
-                let size: UInt64 = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
-                let fileNumber: UInt64 = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
 
                 let cached = fullScanCaches[filePath]
                 if let cached, cached.mtime == mtime, cached.size == size {
@@ -575,9 +571,12 @@ final class ClaudeDataService {
         for session in bgActiveSessions {
             guard let dirPath = transcriptDir(for: session) else { continue }
 
-            // Match both `<sessionId>.jsonl` (main transcript) and `<sessionId>/subagents/*.jsonl`
-            // (Agent-tool sub-runs) — both contain the session id somewhere in the path.
-            for filePath in enumerateJSONLs(in: dirPath) where filePath.contains(session.sessionId) {
+            // `<sessionId>.jsonl` (main transcript) and `<sessionId>/subagents/*.jsonl` (Agent-tool
+            // sub-runs); the rest of the project folder is not listed.
+            let main = dirPath + "/" + session.sessionId + ".jsonl"
+            let paths = (FileManager.default.fileExists(atPath: main) ? [main] : [])
+                + listJSONLs(in: dirPath + "/" + session.sessionId).map(\.path)
+            for filePath in paths {
                 var cursor = pollCursors[filePath] ?? UsageLogCursor()
                 readAppendedLines(of: filePath, cursor: &cursor) { record in
                     guard record.pricing != nil else { return }
@@ -610,16 +609,43 @@ final class ClaudeDataService {
                                  onContinuation: onContinuation, onRecord: onRecord)
     }
 
-    /// Returns absolute paths of every `.jsonl` file under `dir`, descending into subdirectories.
-    /// Claude Code stores sub-agent transcripts at `<dir>/<sessionId>/subagents/agent-*.jsonl`,
-    /// so a one-level scan misses the majority of usage data on heavy users of the Agent tool.
-    private func enumerateJSONLs(in dir: String) -> [String] {
-        guard let en = FileManager.default.enumerator(atPath: dir) else { return [] }
-        var result: [String] = []
-        while let item = en.nextObject() as? String {
-            if item.hasSuffix(".jsonl") {
-                result.append(dir + "/" + item)
-            }
+    /// A transcript found by a walk, with the attributes the scans compare.
+    private struct TranscriptFile {
+        let path: String
+        let mtime: Date
+        let size: UInt64
+        /// Inode: tells a file that grew from one that was replaced.
+        let fileNumber: UInt64
+    }
+
+    private static let listingKeys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey, .fileIdentifierKey]
+    private static let listingKeySet = Set(listingKeys)
+
+    /// Every `.jsonl` file under `dir`, descending into subdirectories: Claude Code stores
+    /// sub-agent transcripts at `<dir>/<sessionId>/subagents/agent-*.jsonl`, so a one-level scan
+    /// misses the majority of usage data on heavy users of the Agent tool. The attributes come
+    /// with the directory listing (one bulk call per folder) instead of one stat per file, about
+    /// four times cheaper on a long history.
+    private func listJSONLs(in dir: String) -> [TranscriptFile] {
+        let base = URL(fileURLWithPath: dir, isDirectory: true)
+        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: Self.listingKeys) else { return [] }
+        // Paths keep the form the caller passed (the enumerator reports the real path of a
+        // symlinked parent, e.g. /var -> /private/var): they are cache keys shared with the
+        // other scans.
+        var roots = [base.path + "/"]
+        if let real = realpath(dir, nil) {
+            roots.append(String(cString: real) + "/")
+            free(real)
+        }
+        let prefix = dir + "/"
+        var result: [TranscriptFile] = []
+        for case let url as URL in en where url.lastPathComponent.hasSuffix(".jsonl") {
+            guard let values = try? url.resourceValues(forKeys: Self.listingKeySet),
+                  let mtime = values.contentModificationDate,
+                  let root = roots.first(where: { url.path.hasPrefix($0) }) else { continue }
+            result.append(TranscriptFile(path: prefix + url.path.dropFirst(root.count), mtime: mtime,
+                                         size: UInt64(values.fileSize ?? 0),
+                                         fileNumber: values.fileIdentifier ?? 0))
         }
         return result
     }
@@ -646,7 +672,8 @@ final class ClaudeDataService {
             todayLastWalk = .distantPast
         }
 
-        var candidates: [String] = []
+        // (path, mtime, size): from the walk's listing, or one stat per known file in between.
+        var candidates: [(path: String, mtime: Date, size: UInt64)] = []
         if now.timeIntervalSince(todayLastWalk) >= Self.todayWalkInterval {
             guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
             let groupFilter = bgSelectedGroup
@@ -656,18 +683,20 @@ final class ClaudeDataService {
                     let dirGroup = ProjectGroup.groupName(from: decoded)
                     if dirGroup != group { continue }
                 }
-                candidates += enumerateJSONLs(in: projectsDir + "/" + dir)
+                candidates += listJSONLs(in: projectsDir + "/" + dir).map { ($0.path, $0.mtime, $0.size) }
             }
             todayLastWalk = now
         } else {
-            candidates = Array(todayFileCaches.keys)
+            for path in todayFileCaches.keys {
+                guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                      let mtime = attrs[.modificationDate] as? Date else { continue }
+                candidates.append((path, mtime, (attrs[.size] as? NSNumber)?.uint64Value ?? 0))
+            }
         }
 
         var seenFiles: Set<String> = []
 
-        for filePath in candidates {
-            guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
-                  let mtime = attrs[.modificationDate] as? Date else { continue }
+        for (filePath, mtime, currentSize) in candidates {
 
             // Not modified today → cannot contain today's entries.
             if mtime < todayStart { continue }
@@ -679,7 +708,6 @@ final class ClaudeDataService {
             if cache.mtime == mtime { continue }
 
             // File shrunk (rotated/truncated) → discard cache and start over.
-            let currentSize: UInt64 = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
             if currentSize < cache.cursor.offset {
                 cache = TodayFileCache()
             }

@@ -316,6 +316,42 @@ struct ScanCorrectnessTests {
         expectSameScan(service, await coldScan(history.root))
     }
 
+    /// Agent-tool runs write `<session>/subagents/agent-*.jsonl` (sidechain lines); every scan
+    /// counts them like the main transcript, and the active-session poll follows them too.
+    @Test func subagentTranscriptsAreCountedByEveryScan() async throws {
+        var history = try SyntheticHistory(models: ["claude-opus-5-5", "claude-haiku-5-5"], seed: 23)
+        defer { history.remove() }
+        try history.generate(projects: 1, filesPerProject: 2, messagesPerFile: 12, todayShare: 1)
+        // Move the second file to the first session's subagents folder.
+        let main = history.files[0].url
+        let sessionId = main.deletingPathExtension().lastPathComponent
+        let subagents = main.deletingLastPathComponent().appendingPathComponent("\(sessionId)/subagents")
+        try FileManager.default.createDirectory(at: subagents, withIntermediateDirectories: true)
+        let agent = subagents.appendingPathComponent("agent-a1b2.jsonl")
+        try FileManager.default.moveItem(at: history.files[1].url, to: agent)
+        try history.writeSession(forFileAt: 0)
+
+        let service = ClaudeDataService(claudeDir: history.root.path)
+        service.loadSessions()
+        service.unifiedFullScan()
+        service.computeTodaySummaries()
+        await drainMainQueue()
+        let requests = priced(history.requests)
+        #expect(service.allTimeCalls == requests.count)
+        #expect(service.todayCalls == requests.count)
+
+        // A sub-run appended while the session is live reaches the totals through the poll.
+        let before = service.totalTokens
+        let line = #"{"type":"assistant","isSidechain":true,"timestamp":"\#(SyntheticHistory.timestamp(Date()))","message":{"id":"msg_sub","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":700,"output_tokens":300,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#
+        let handle = try FileHandle(forWritingTo: agent)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((line + "\n").utf8))
+        try handle.close()
+        service.pollActiveSessions()
+        await drainMainQueue()
+        #expect(service.totalTokens - before == 1_000)
+    }
+
     @Test func projectDirNameMatchesClaudeCodeEncoding() {
         #expect(ClaudeDataService.projectDirName(forCwd: "/home/dev/Documents/Acme/app") == "-home-dev-Documents-Acme-app")
         #expect(ClaudeDataService.projectDirName(forCwd: "/a/My Project_v1.2") == "-a-My-Project-v1-2")
