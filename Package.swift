@@ -1,9 +1,9 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.0
 import PackageDescription
 
 let package = Package(
     name: "Thoth",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v14)], // @Observable and symbolEffect
     targets: [
         .executableTarget(
             name: "Thoth",
@@ -14,5 +14,7 @@ let package = Package(
             dependencies: ["Thoth"],
             path: "Tests/ThothTests"
         )
-    ]
+    ],
+    // Swift 6 strict concurrency is not adopted yet; keep the Swift 5 language mode.
+    swiftLanguageModes: [.v5]
 )

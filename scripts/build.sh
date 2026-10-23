@@ -6,10 +6,16 @@ BUILD_DIR="build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 ICON_SRC="icon/icon_1024.png"
 
-echo "Building $APP_NAME (release)..."
-swift build -c release
+# Universal (Apple silicon + Intel) by default; e.g. ARCHS=arm64 for a faster local build.
+ARCHS="${ARCHS:-arm64 x86_64}"
+ARCH_FLAGS=()
+for arch in $ARCHS; do ARCH_FLAGS+=(--arch "$arch"); done
 
-BIN_PATH=$(swift build -c release --show-bin-path)
+echo "Building $APP_NAME (release, $ARCHS)..."
+swift build -c release "${ARCH_FLAGS[@]}"
+
+BIN_PATH=$(swift build -c release "${ARCH_FLAGS[@]}" --show-bin-path)
+lipo "$BIN_PATH/$APP_NAME" -verify_arch $ARCHS
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"

@@ -10,17 +10,19 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Run tests
         run: swift test
 
       - name: Build release
         run: |
-          swift build -c release
-          BIN_PATH=$(swift build -c release --show-bin-path)
+          # Universal binary: Apple silicon + Intel.
+          swift build -c release --arch arm64 --arch x86_64
+          BIN_PATH=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)
+          lipo "$BIN_PATH/Thoth" -verify_arch arm64 x86_64
 
           APP_NAME="Thoth"
           APP_BUNDLE="$APP_NAME.app"
