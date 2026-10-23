@@ -62,7 +62,7 @@ struct SyntheticHistory {
     /// Creates `projects × filesPerProject` session files with `messagesPerFile` responses each.
     /// `todayShare` of the files hold today's activity; the rest are spread over the last 60 days.
     mutating func generate(projects: Int, filesPerProject: Int, messagesPerFile: Int,
-                           todayShare: Double = 0.1, cwdBase: String = "/home/dev/Documents") throws {
+                           todayShare: Double = 0.1, cwdBase: String = "/srv/synthetic/Documents") throws {
         let now = Date()
         for p in 0..<projects {
             let cwd = "\(cwdBase)/Group\(p % 5)/project-\(p)"

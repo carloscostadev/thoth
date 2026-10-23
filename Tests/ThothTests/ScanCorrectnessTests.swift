@@ -142,7 +142,7 @@ struct ScanCorrectnessTests {
         var history = try SyntheticHistory(models: ["claude-sonnet-5-5"], seed: 3)
         defer { history.remove() }
         try history.generate(projects: 1, filesPerProject: 2, messagesPerFile: 10,
-                             cwdBase: "/home/dev/Documents/Client Work - 2026")
+                             cwdBase: "/srv/synthetic/Documents/Client Work - 2026")
         try history.writeSession(forFileAt: 0)
 
         let service = ClaudeDataService(claudeDir: history.root.path)

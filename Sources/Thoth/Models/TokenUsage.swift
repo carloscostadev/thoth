@@ -105,9 +105,18 @@ struct ModelUsageEntry: Identifiable {
 
 struct ModelUsageAggregator {
     private(set) var entries: [ModelUsageEntry] = []
+    /// Raw id -> row key, so a scan over many files parses each distinct id once.
+    private var keys: [String: String] = [:]
+
+    private mutating func key(for model: String) -> String {
+        if let key = keys[model] { return key }
+        let key = ModelUsageEntry.key(for: model)
+        keys[model] = key
+        return key
+    }
 
     mutating func incrementSessionCount(for model: String) {
-        let key = ModelUsageEntry.key(for: model)
+        let key = key(for: model)
         if let idx = entries.firstIndex(where: { $0.modelId == key }) {
             entries[idx].sessionCount += 1
         }
@@ -120,7 +129,7 @@ struct ModelUsageAggregator {
 
     /// Adds already-priced usage (e.g. a per-file aggregate of many requests).
     mutating func add(usage: TokenUsage, cost: Double, model: String) {
-        let key = ModelUsageEntry.key(for: model)
+        let key = key(for: model)
         let idx: Int
         if let existing = entries.firstIndex(where: { $0.modelId == key }) {
             idx = existing

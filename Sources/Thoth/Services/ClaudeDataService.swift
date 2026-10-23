@@ -70,6 +70,7 @@ final class ClaudeDataService {
     @ObservationIgnored private var todayFileCaches: [String: TodayFileCache] = [:]
     @ObservationIgnored private var todayCacheDay: Date? = nil
     @ObservationIgnored private var fullScanCaches: [String: FullFileCache] = [:]
+    @ObservationIgnored private var heuristicGroups: [String: String] = [:] // projects/<dir> name -> group
 
     private struct TodayFileCache {
         var mtime: Date = .distantPast
@@ -183,11 +184,18 @@ final class ClaudeDataService {
 
         let cal = Calendar.current
 
-        // Pass 1: refresh per-file caches by re-parsing only files that changed.
+        // Pass 1: find files that changed since their cached aggregate.
         var seenFiles: Set<String> = []
+        var jobs: [FullScanJob] = []
         for dir in dirs {
-            let decoded = ProjectGroup.decodePath(dir)
-            let heuristicGroupName = ProjectGroup.groupName(from: decoded)
+            // decodePath may probe the filesystem for ambiguous names; the answer is stable per name.
+            let heuristicGroupName: String
+            if let cached = heuristicGroups[dir] {
+                heuristicGroupName = cached
+            } else {
+                heuristicGroupName = ProjectGroup.groupName(from: ProjectGroup.decodePath(dir))
+                heuristicGroups[dir] = heuristicGroupName
+            }
 
             let dirPath = projectsDir + "/" + dir
             for filePath in enumerateJSONLs(in: dirPath) {
@@ -200,10 +208,24 @@ final class ClaudeDataService {
                 if let cached = fullScanCaches[filePath], cached.mtime == mtime, cached.size == size {
                     continue
                 }
-
-                refreshFullScanCache(filePath: filePath, mtime: mtime, size: size,
-                                     heuristicGroup: heuristicGroupName, calendar: cal)
+                jobs.append(FullScanJob(path: filePath, mtime: mtime, heuristicGroup: heuristicGroupName))
             }
+        }
+
+        // Re-parse them. Files are independent, so a cold start (every file) spreads over the
+        // available cores; results are merged back here, on analyticsQueue.
+        var results = [(cache: FullFileCache, cursor: UsageLogCursor)?](repeating: nil, count: jobs.count)
+        results.withUnsafeMutableBufferPointer { buffer in
+            DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
+                autoreleasepool {
+                    buffer[i] = Self.buildFullFileCache(jobs[i], calendar: cal)
+                }
+            }
+        }
+        for (job, result) in zip(jobs, results) {
+            guard let result else { continue }
+            fullScanCaches[job.path] = result.cache
+            pollCursors[job.path] = result.cursor
         }
 
         // Prune entries for files that disappeared.
@@ -325,78 +347,80 @@ final class ClaudeDataService {
         }
     }
 
-    /// Parses a single JSONL file and stores its aggregate in `fullScanCaches`. Caller is
-    /// responsible for the cache-validity check; this always re-reads from byte 0.
-    private func refreshFullScanCache(filePath: String, mtime: Date, size: UInt64,
-                                      heuristicGroup: String, calendar cal: Calendar) {
-        autoreleasepool {
-            guard let fh = FileHandle(forReadingAtPath: filePath) else { return }
-            defer { try? fh.close() }
-            guard let data = try? fh.readToEnd(), !data.isEmpty else {
-                // Empty file — record a stub cache so we don't keep re-trying.
-                var stub = FullFileCache()
-                stub.mtime = mtime
-                stub.size = size
-                stub.groupKey = heuristicGroup
-                fullScanCaches[filePath] = stub
-                pollCursors[filePath] = UsageLogCursor(offset: size)
-                return
+    private struct FullScanJob {
+        let path: String
+        let mtime: Date
+        let heuristicGroup: String
+    }
+
+    /// Parses a whole JSONL file into its time-independent aggregate, plus the read position the
+    /// active-session poll should continue from. Pure function of the file: safe to run
+    /// concurrently. Returns nil if the file can't be read.
+    private static func buildFullFileCache(_ job: FullScanJob,
+                                           calendar cal: Calendar) -> (cache: FullFileCache, cursor: UsageLogCursor)? {
+        var cache = FullFileCache()
+        cache.mtime = job.mtime
+        var fileCwd: String? = nil
+        var cursor = UsageLogCursor()
+        // Calendar lookups are the hot spot after JSON decoding; every zone offset is a multiple
+        // of 15 minutes, so one lookup per quarter hour gives the same day / weekday / hour.
+        var buckets: [Int: (day: Date, weekday: Int, hour: Int)] = [:]
+
+        let bytesRead = UsageLogParser.parseFile(atPath: job.path, cursor: &cursor,
+                                                 onCwd: { fileCwd = $0 }) { record in
+            guard let d = record.timestamp, let pricing = record.pricing else { return }
+            let usage = record.usage
+            let cost = record.cost
+            let toks = usage.totalTokens
+
+            cache.totalCost += cost
+            cache.totalTokens += toks
+            cache.totalCalls += 1
+            cache.sessionModels.insert(record.model)
+
+            if var existing = cache.modelTokens[record.model] {
+                existing.input += usage.inputTokens
+                existing.output += usage.outputTokens
+                existing.cacheWrite += usage.cacheWriteTokens
+                existing.cacheRead += usage.cacheReadTokens
+                existing.cost += cost
+                cache.modelTokens[record.model] = existing
+            } else {
+                cache.modelTokens[record.model] = (usage.inputTokens, usage.outputTokens,
+                                                   usage.cacheWriteTokens, usage.cacheReadTokens, cost)
             }
 
-            var cache = FullFileCache()
-            cache.mtime = mtime
-            cache.size = UInt64(data.count)
-            var fileCwd: String? = nil
-            var lastMessageId: String? = nil
+            cache.totalCacheRead += usage.cacheReadTokens
+            cache.totalInput += usage.inputTokens
+            let rates = pricing.rates(forPromptTokens: usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)
+            cache.savings += Double(usage.cacheReadTokens) * (rates.input - rates.cacheRead) / 1_000_000.0
 
-            let consumed = UsageLogParser.parse(data, lastMessageId: &lastMessageId,
-                                                onCwd: { fileCwd = $0 }) { record in
-                guard let d = record.timestamp, let pricing = record.pricing else { return }
-                let usage = record.usage
-                let cost = record.cost
-                let toks = usage.totalTokens
-
-                cache.totalCost += cost
-                cache.totalTokens += toks
-                cache.totalCalls += 1
-                cache.sessionModels.insert(record.model)
-
-                if var existing = cache.modelTokens[record.model] {
-                    existing.input += usage.inputTokens
-                    existing.output += usage.outputTokens
-                    existing.cacheWrite += usage.cacheWriteTokens
-                    existing.cacheRead += usage.cacheReadTokens
-                    existing.cost += cost
-                    cache.modelTokens[record.model] = existing
-                } else {
-                    cache.modelTokens[record.model] = (usage.inputTokens, usage.outputTokens,
-                                                       usage.cacheWriteTokens, usage.cacheReadTokens, cost)
-                }
-
-                cache.totalCacheRead += usage.cacheReadTokens
-                cache.totalInput += usage.inputTokens
-                let rates = pricing.rates(forPromptTokens: usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)
-                cache.savings += Double(usage.cacheReadTokens) * (rates.input - rates.cacheRead) / 1_000_000.0
-
-                let day = cal.startOfDay(for: d)
-                if var existing = cache.perDay[day] {
-                    existing.cost += cost
-                    existing.tokens += toks
-                    existing.calls += 1
-                    cache.perDay[day] = existing
-                } else {
-                    cache.perDay[day] = (cost, toks, 1)
-                }
-
-                let weekday = (cal.component(.weekday, from: d) + 5) % 7
-                let hour = cal.component(.hour, from: d)
-                cache.heat[weekday][hour] += cost
+            let bucketKey = Int((d.timeIntervalSince1970 / 900).rounded(.down))
+            let bucket: (day: Date, weekday: Int, hour: Int)
+            if let cached = buckets[bucketKey] {
+                bucket = cached
+            } else {
+                bucket = (cal.startOfDay(for: d), (cal.component(.weekday, from: d) + 5) % 7, cal.component(.hour, from: d))
+                buckets[bucketKey] = bucket
             }
 
-            cache.groupKey = fileCwd.map(ProjectGroup.groupName(fromRealPath:)) ?? heuristicGroup
-            fullScanCaches[filePath] = cache
-            pollCursors[filePath] = UsageLogCursor(offset: UInt64(consumed), lastMessageId: lastMessageId)
+            if var existing = cache.perDay[bucket.day] {
+                existing.cost += cost
+                existing.tokens += toks
+                existing.calls += 1
+                cache.perDay[bucket.day] = existing
+            } else {
+                cache.perDay[bucket.day] = (cost, toks, 1)
+            }
+            cache.heat[bucket.weekday][bucket.hour] += cost
         }
+        guard let bytesRead else { return nil }
+
+        // Size of what was actually read: if the file grew meanwhile, the next scan sees a
+        // different size and re-parses it.
+        cache.size = bytesRead
+        cache.groupKey = fileCwd.map(ProjectGroup.groupName(fromRealPath:)) ?? job.heuristicGroup
+        return (cache, cursor)
     }
 
     // MARK: - Sessions
@@ -511,13 +535,8 @@ final class ClaudeDataService {
     private func readAppendedLines(of path: String, cursor: inout UsageLogCursor,
                                    onContinuation: ((_ toolNames: [String]) -> Void)? = nil,
                                    onRecord: (UsageRecord) -> Void) {
-        guard let fh = FileHandle(forReadingAtPath: path) else { return }
-        defer { try? fh.close() }
-        guard (try? fh.seek(toOffset: cursor.offset)) != nil,
-              let data = try? fh.readToEnd(), !data.isEmpty else { return }
-        let consumed = UsageLogParser.parse(data, lastMessageId: &cursor.lastMessageId,
-                                            onContinuation: onContinuation, onRecord: onRecord)
-        cursor.offset += UInt64(consumed)
+        UsageLogParser.parseFile(atPath: path, cursor: &cursor,
+                                 onContinuation: onContinuation, onRecord: onRecord)
     }
 
     /// Returns absolute paths of every `.jsonl` file under `dir`, descending into subdirectories.
