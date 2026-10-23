@@ -214,15 +214,17 @@ final class ClaudeDataService {
 
         // Re-parse them. Files are independent, so a cold start (every file) spreads over the
         // available cores; results are merged back here, on analyticsQueue.
-        var results = [(cache: FullFileCache, cursor: UsageLogCursor)?](repeating: nil, count: jobs.count)
+        let pending = jobs
+        var results = [(cache: FullFileCache, cursor: UsageLogCursor)?](repeating: nil, count: pending.count)
         results.withUnsafeMutableBufferPointer { buffer in
-            DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
+            let slots = buffer // each iteration writes only its own index
+            DispatchQueue.concurrentPerform(iterations: pending.count) { i in
                 autoreleasepool {
-                    buffer[i] = Self.buildFullFileCache(jobs[i], calendar: cal)
+                    slots[i] = Self.buildFullFileCache(pending[i], calendar: cal)
                 }
             }
         }
-        for (job, result) in zip(jobs, results) {
+        for (job, result) in zip(pending, results) {
             guard let result else { continue }
             fullScanCaches[job.path] = result.cache
             pollCursors[job.path] = result.cursor

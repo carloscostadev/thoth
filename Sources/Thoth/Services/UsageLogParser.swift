@@ -208,7 +208,8 @@ enum UsageLogParser {
 
     // MARK: - Timestamps
 
-    private static let isoFormatter: ISO8601DateFormatter = {
+    // ISO8601DateFormatter is documented as thread-safe; parsing runs on several threads.
+    nonisolated(unsafe) private static let isoFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
