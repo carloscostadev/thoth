@@ -374,10 +374,12 @@ final class ClaudeDataService {
             let usage = record.usage
             let cost = record.cost
             let toks = usage.totalTokens
+            // A correction completes a response already counted: tokens and cost, not a call.
+            let calls = record.isCorrection ? 0 : 1
 
             cache.totalCost += cost
             cache.totalTokens += toks
-            cache.totalCalls += 1
+            cache.totalCalls += calls
             cache.sessionModels.insert(record.model)
 
             if var existing = cache.modelTokens[record.model] {
@@ -409,10 +411,10 @@ final class ClaudeDataService {
             if var existing = cache.perDay[bucket.day] {
                 existing.cost += cost
                 existing.tokens += toks
-                existing.calls += 1
+                existing.calls += calls
                 cache.perDay[bucket.day] = existing
             } else {
-                cache.perDay[bucket.day] = (cost, toks, 1)
+                cache.perDay[bucket.day] = (cost, toks, calls)
             }
             cache.heat[bucket.weekday][bucket.hour] += cost
         }
@@ -499,7 +501,7 @@ final class ClaudeDataService {
     /// poll (or the last heavy scan, whichever ran more recently). Aggregates the delta and dispatches
     /// the @Observable writes to the main thread in one batch.
     func pollActiveSessions() {
-        var deltaUsages: [(TokenUsage, String)] = []
+        var deltaUsages: [(usage: TokenUsage, cost: Double, model: String)] = []
         let sampleAt = Date()
         let filterStart = bgDateFilter.startDate
 
@@ -513,7 +515,7 @@ final class ClaudeDataService {
                 readAppendedLines(of: filePath, cursor: &cursor) { record in
                     guard record.pricing != nil else { return }
                     if let filterStart, let date = record.timestamp, date < filterStart { return }
-                    deltaUsages.append((record.usage, record.model))
+                    deltaUsages.append((record.usage, record.cost, record.model))
                 }
                 pollCursors[filePath] = cursor
             }
@@ -523,9 +525,9 @@ final class ClaudeDataService {
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            for (usage, model) in deltaUsages {
-                self.modelUsage.add(usage: usage, model: model)
-                self.totalCost += usage.cost(for: model)
+            for (usage, cost, model) in deltaUsages {
+                self.modelUsage.add(usage: usage, cost: cost, model: model)
+                self.totalCost += cost
                 self.totalTokens += usage.totalTokens
                 self.burnRateTracker.addSample(tokens: usage.totalTokens, at: sampleAt)
             }
@@ -606,6 +608,17 @@ final class ClaudeDataService {
                     readAppendedLines(of: filePath, cursor: &cursor, onContinuation: { tools in
                         cache.pending?.tools.append(contentsOf: tools)
                     }) { record in
+                        if record.isCorrection {
+                            // More output for the response just read: it is still `pending` (or
+                            // already summed, when it was not an assistant line).
+                            guard record.pricing != nil else { return }
+                            if let date = record.timestamp, date < todayStart { return }
+                            cache.cost += record.cost
+                            cache.tokens += record.usage.totalTokens
+                            cache.pending?.cost += record.cost
+                            cache.pending?.tokens += record.usage.totalTokens
+                            return
+                        }
                         cache.commitPending()
                         guard record.pricing != nil else { return }
                         // Skip entries from before today (file may straddle midnight on first scan).

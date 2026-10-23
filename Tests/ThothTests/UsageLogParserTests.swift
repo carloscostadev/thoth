@@ -4,8 +4,8 @@ import Testing
 @testable import Thoth
 
 private func line(id: String, model: String = "claude-sonnet-5-5", block: String = #"{"type":"text","text":"hi"}"#,
-                  input: Int = 10, ts: String = "2026-10-23T09:12:34.567Z") -> String {
-    #"{"type":"assistant","cwd":"/srv/x/Documents/G/p","timestamp":"\#(ts)","message":{"id":"\#(id)","model":"\#(model)","content":[\#(block)],"usage":{"input_tokens":\#(input),"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#
+                  input: Int = 10, output: Int = 5, ts: String = "2026-10-23T09:12:34.567Z") -> String {
+    #"{"type":"assistant","cwd":"/srv/x/Documents/G/p","timestamp":"\#(ts)","message":{"id":"\#(id)","model":"\#(model)","content":[\#(block)],"usage":{"input_tokens":\#(input),"output_tokens":\#(output),"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#
         + "\n"
 }
 
@@ -29,15 +29,15 @@ private func line(id: String, model: String = "claude-sonnet-5-5", block: String
     let text = line(id: "a") + line(id: "a", block: #"{"type":"tool_use","name":"Bash","input":{}}"#)
         + line(id: "b") + #"{"type":"assistant","message":{"id":"c""#
     let data = Data(text.utf8)
-    var last: String?
+    var open: OpenResponse?
     var records: [UsageRecord] = []
     var continuations: [[String]] = []
     var cwd: String?
-    let consumed = UsageLogParser.parse(data, lastMessageId: &last, onCwd: { cwd = $0 },
+    let consumed = UsageLogParser.parse(data, open: &open, onCwd: { cwd = $0 },
                                         onContinuation: { continuations.append($0) }) { records.append($0) }
     #expect(records.map(\.messageId) == ["a", "b"])
     #expect(continuations == [["Bash"]])
-    #expect(last == "b")
+    #expect(open?.id == "b")
     #expect(cwd == "/srv/x/Documents/G/p")
     #expect(consumed == text.utf8.count - #"{"type":"assistant","message":{"id":"c""#.utf8.count)
 }
@@ -51,9 +51,9 @@ private func line(id: String, model: String = "claude-sonnet-5-5", block: String
         "",
         #"{"type":"assistant","message":{"id":"y","model":"<synthetic>","content":"oops","usage":{"input_tokens":0,"output_tokens":0}}}"#,
     ].joined(separator: "\n") + "\n"
-    var last: String?
+    var open: OpenResponse?
     var records: [UsageRecord] = []
-    UsageLogParser.parse(Data(text.utf8), lastMessageId: &last) { records.append($0) }
+    UsageLogParser.parse(Data(text.utf8), open: &open) { records.append($0) }
     #expect(records.count == 1)
     #expect(records.first?.model == "<synthetic>")
     #expect(records.first?.pricing == nil)
@@ -63,22 +63,22 @@ private func line(id: String, model: String = "claude-sonnet-5-5", block: String
 @Test func chunkedFileReadingMatchesWholeFileParsing() throws {
     var text = ""
     for i in 0..<200 {
-        text += line(id: "m\(i / 3)", input: i) // three lines per response
+        text += line(id: "m\(i / 3)", input: i / 3, output: 1 + i) // three lines per response, output growing
     }
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("thoth-parser-\(UUID().uuidString).jsonl")
     try Data(text.utf8).write(to: url)
     defer { try? FileManager.default.removeItem(at: url) }
 
     var reference: [String] = []
-    var last: String?
-    UsageLogParser.parse(Data(text.utf8), lastMessageId: &last) { reference.append($0.messageId ?? "") }
+    var open: OpenResponse?
+    UsageLogParser.parse(Data(text.utf8), open: &open) { if !$0.isCorrection { reference.append($0.messageId ?? "") } }
     #expect(reference.count == 67)
 
     for chunkSize in [1, 7, 64, 333, 1 << 20] {
         var cursor = UsageLogCursor()
         var ids: [String] = []
         let read = UsageLogParser.parseFile(atPath: url.path, cursor: &cursor, chunkSize: chunkSize) {
-            ids.append($0.messageId ?? "")
+            if !$0.isCorrection { ids.append($0.messageId ?? "") }
         }
         #expect(ids == reference, "chunk \(chunkSize)")
         #expect(read == UInt64(text.utf8.count))
@@ -90,9 +90,50 @@ private func line(id: String, model: String = "claude-sonnet-5-5", block: String
     var firstHalf = 0
     let half = Data(text.utf8).prefix(text.utf8.count / 2)
     try half.write(to: url)
-    UsageLogParser.parseFile(atPath: url.path, cursor: &cursor) { _ in firstHalf += 1 }
+    UsageLogParser.parseFile(atPath: url.path, cursor: &cursor) { if !$0.isCorrection { firstHalf += 1 } }
     try Data(text.utf8).write(to: url)
     var secondHalf = 0
-    UsageLogParser.parseFile(atPath: url.path, cursor: &cursor) { _ in secondHalf += 1 }
+    UsageLogParser.parseFile(atPath: url.path, cursor: &cursor) { if !$0.isCorrection { secondHalf += 1 } }
     #expect(firstHalf + secondHalf == 67)
+}
+
+/// Claude Code streams a response over several lines: `output_tokens` grows and only the last
+/// line has the final count. Summing every record must give the final usage, as one call.
+@Test func streamedResponseCountsItsFinalUsageOnce() {
+    let tool = #"{"type":"tool_use","name":"Bash","input":{}}"#
+    let text = line(id: "s", output: 1) + line(id: "s", output: 40)
+        + line(id: "s", block: tool, output: 300) + line(id: "t", output: 7)
+    var open: OpenResponse?
+    var records: [UsageRecord] = []
+    var continuations: [[String]] = []
+    UsageLogParser.parse(Data(text.utf8), open: &open,
+                         onContinuation: { continuations.append($0) }) { records.append($0) }
+
+    let calls = records.filter { !$0.isCorrection }
+    #expect(calls.map(\.messageId) == ["s", "t"])
+    let s = records.filter { $0.messageId == "s" }
+    #expect(s.reduce(0) { $0 + $1.usage.outputTokens } == 300)
+    #expect(s.reduce(0) { $0 + $1.usage.inputTokens } == 10)
+    let final = TokenUsage(inputTokens: 10, outputTokens: 300, cacheWriteTokens: 0, cacheReadTokens: 0)
+    #expect(abs(s.reduce(0.0) { $0 + $1.cost } - final.cost(for: "claude-sonnet-5-5")) < 1e-12)
+    #expect(s.allSatisfy { $0.timestamp == s.first?.timestamp })
+    #expect(continuations == [[], ["Bash"]])
+}
+
+/// The same response split between two reads (a line still being written) ends with the same
+/// totals as one read, and a stale line with less output is ignored.
+@Test func streamedResponseSplitAcrossReadsKeepsFinalUsage() {
+    let first = line(id: "s", output: 1) + line(id: "s", output: 40)
+    let second = line(id: "s", output: 300) + line(id: "s", output: 20)
+    var open: OpenResponse?
+    var output = 0, calls = 0
+    for chunk in [first, second] {
+        UsageLogParser.parse(Data(chunk.utf8), open: &open) { r in
+            output += r.usage.outputTokens
+            if !r.isCorrection { calls += 1 }
+        }
+    }
+    #expect(output == 300)
+    #expect(calls == 1)
+    #expect(open?.usage.outputTokens == 300)
 }

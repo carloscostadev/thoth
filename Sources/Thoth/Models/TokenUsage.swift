@@ -1,7 +1,7 @@
 // Sources/Thoth/Models/TokenUsage.swift
 import Foundation
 
-struct TokenUsage: Codable {
+struct TokenUsage: Codable, Equatable {
     let inputTokens: Int
     let outputTokens: Int
     /// Total cache creation tokens (5-minute + 1-hour).
@@ -21,6 +21,15 @@ struct TokenUsage: Codable {
 
     var totalTokens: Int {
         inputTokens + outputTokens + cacheWriteTokens + cacheReadTokens
+    }
+
+    /// Field-by-field difference, e.g. the growth of a streamed response's usage.
+    func subtracting(_ other: TokenUsage) -> TokenUsage {
+        TokenUsage(inputTokens: inputTokens - other.inputTokens,
+                   outputTokens: outputTokens - other.outputTokens,
+                   cacheWriteTokens: cacheWriteTokens - other.cacheWriteTokens,
+                   cacheReadTokens: cacheReadTokens - other.cacheReadTokens,
+                   cacheWrite1hTokens: cacheWrite1hTokens - other.cacheWrite1hTokens)
     }
 
     func cost(for modelId: String) -> Double {

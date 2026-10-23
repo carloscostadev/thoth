@@ -6,7 +6,8 @@ import Foundation
 /// The layout and line shapes mirror what Claude Code writes: one JSONL per session under
 /// `projects/<encoded-cwd>/`, a user line followed by one assistant line per content block
 /// (thinking / text / tool_use), and every assistant line of the same API response repeating
-/// the same `message.id` and the same `usage`. No real user data is involved.
+/// the same `message.id` and `usage`, with `output_tokens` growing while the response streams:
+/// only the last line carries the final count. No real user data is involved.
 struct SyntheticHistory {
     /// One unique API response, as it should be counted.
     struct Request {
@@ -127,7 +128,9 @@ struct SyntheticHistory {
             out += #"{"type":"user","cwd":"\#(file.cwd)","timestamp":"\#(ts)","message":{"role":"user","content":[{"type":"tool_result","content":"\#(filler(600 + rng.next(upTo: 1_800)))"}]}}"#
             out += "\n"
 
-            let usage = #"{"input_tokens":\#(request.input),"cache_creation_input_tokens":\#(request.cacheWrite),"cache_read_input_tokens":\#(request.cacheRead),"cache_creation":{"ephemeral_5m_input_tokens":\#(request.cacheWrite5m),"ephemeral_1h_input_tokens":\#(request.cacheWrite1h)},"output_tokens":\#(request.output),"service_tier":"standard"}"#
+            func usage(output: Int) -> String {
+                #"{"input_tokens":\#(request.input),"cache_creation_input_tokens":\#(request.cacheWrite),"cache_read_input_tokens":\#(request.cacheRead),"cache_creation":{"ephemeral_5m_input_tokens":\#(request.cacheWrite5m),"ephemeral_1h_input_tokens":\#(request.cacheWrite1h)},"output_tokens":\#(output),"service_tier":"standard"}"#
+            }
             var blocks: [String] = [#"{"type":"thinking","thinking":"","signature":"\#(filler(300 + rng.next(upTo: 900)))"}"#]
             if rng.nextDouble() < 0.5 {
                 blocks.append(#"{"type":"text","text":"\#(filler(100 + rng.next(upTo: 600)))"}"#)
@@ -135,8 +138,11 @@ struct SyntheticHistory {
             for tool in request.tools {
                 blocks.append(#"{"type":"tool_use","id":"toolu_\#(rng.next(upTo: 1_000_000))","name":"\#(tool)","input":{"command":"\#(filler(40 + rng.next(upTo: 200)))"}}"#)
             }
-            for block in blocks {
-                out += #"{"type":"assistant","cwd":"\#(file.cwd)","requestId":"req_\#(msgId)","timestamp":"\#(ts)","message":{"id":"\#(msgId)","model":"\#(request.model)","role":"assistant","content":[\#(block)],"stop_reason":null,"usage":\#(usage)}}"#
+            for (k, block) in blocks.enumerated() {
+                // Partial output on earlier lines, the final count on the last one.
+                let output = k == blocks.count - 1
+                    ? request.output : max(1, request.output * (k + 1) / (blocks.count + 1))
+                out += #"{"type":"assistant","cwd":"\#(file.cwd)","requestId":"req_\#(msgId)","timestamp":"\#(ts)","message":{"id":"\#(msgId)","model":"\#(request.model)","role":"assistant","content":[\#(block)],"stop_reason":null,"usage":\#(usage(output: output))}}"#
                 out += "\n"
             }
         }
