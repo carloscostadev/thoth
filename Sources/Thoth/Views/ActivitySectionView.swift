@@ -41,7 +41,9 @@ struct ActivitySectionView: View {
             Text("\(entry.turns) turns")
                 .font(Theme.Font.captionNumber)
                 .foregroundStyle(Theme.Palette.textTertiary)
-                .frame(width: 58, alignment: .trailing)
+                .lineLimit(1)
+                .fixedSize()
+                .frame(minWidth: 58, alignment: .trailing)
         }
         .frame(height: 20)
     }

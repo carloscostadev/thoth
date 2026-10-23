@@ -43,7 +43,7 @@ struct PopoverView: View {
                 .padding(.horizontal, Theme.Spacing.lg)
                 .padding(.bottom, Theme.Spacing.md)
             }
-            .frame(maxHeight: Theme.Size.contentMaxHeight)
+            .frame(height: Theme.Size.contentHeight)
 
             ThemeDivider()
 

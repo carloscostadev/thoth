@@ -140,7 +140,13 @@ enum Theme {
 
     enum Size {
         static let popoverWidth: CGFloat = 400
-        static let contentMaxHeight: CGFloat = 540
+        /// Fixed height of the scrolling tab content. A ScrollView has no ideal height,
+        /// so inside a MenuBarExtra window it collapses unless given one explicitly.
+        /// Capped so header + tabs + footer still fit on small screens.
+        static var contentHeight: CGFloat {
+            let visible = NSScreen.main?.visibleFrame.height ?? 900
+            return max(280, min(520, visible - 360))
+        }
         static let dot: CGFloat = 6
         static let barHeight: CGFloat = 4
         static let thinBarHeight: CGFloat = 3
