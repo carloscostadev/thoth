@@ -32,11 +32,16 @@ enum ThothMark {
         return path
     }()
 
-    /// Menu bar icon: template image (follows light/dark and the highlight),
-    /// 16 pt of ink in an 11 × 18 pt canvas. Drawn by a handler at the backing
-    /// scale, so it is sharp at 1x and 2x. The main stem's left edge and the
+    /// Menu bar icon while Claude Code is working.
+    static let menuBarImage = makeMenuBarImage(opacity: 1)
+    /// Menu bar icon while Claude Code is asleep: the same mark, dimmed.
+    static let menuBarImageDimmed = makeMenuBarImage(opacity: 0.45)
+
+    /// Template image (follows light/dark and the highlight; a template's alpha is kept, so
+    /// `opacity` dims it), 16 pt of ink in an 11 × 18 pt canvas. Drawn by a handler at the
+    /// backing scale, so it is sharp at 1x and 2x. The main stem's left edge and the
     /// crossbar's top edge sit on whole points.
-    static let menuBarImage: NSImage = {
+    private static func makeMenuBarImage(opacity: CGFloat) -> NSImage {
         let inkHeight: CGFloat = 16
         let scale = inkHeight / inkRect.height
         // Stem left edge and crossbar top edge are both 21 units into the ink.
@@ -44,13 +49,13 @@ enum ThothMark {
         let image = NSImage(size: NSSize(width: 11, height: 18), flipped: true) { _ in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
             ctx.translateBy(x: snap, y: snap)
-            draw(in: ctx, scale: scale, color: .black)
+            draw(in: ctx, scale: scale, color: CGColor(gray: 0, alpha: opacity))
             return true
         }
         image.isTemplate = true
         image.accessibilityDescription = "Thoth"
         return image
-    }()
+    }
 
     /// Strokes the mark with its ink box at the context origin (context must be y-down).
     static func draw(in ctx: CGContext, scale: CGFloat, color: CGColor) {

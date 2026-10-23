@@ -26,9 +26,9 @@ struct MenuBarLabel: View {
     let service: ClaudeDataService
 
     var body: some View {
-        // The Thoth symbol is a drawn template image, not an SF Symbol, so it takes
-        // no symbol effects: the activity state shows in the popover instead.
-        Image(nsImage: ThothMark.menuBarImage)
+        // Full mark while Claude Code is working, dimmed while it sleeps. No animation:
+        // the image only swaps when the state changes.
+        Image(nsImage: service.activityState == .sleep ? ThothMark.menuBarImageDimmed : ThothMark.menuBarImage)
             .onAppear {
                 service.start()
             }
