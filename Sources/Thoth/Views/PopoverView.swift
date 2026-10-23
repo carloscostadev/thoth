@@ -93,7 +93,7 @@ struct TabBarView: View {
 struct FooterView: View {
     var body: some View {
         HStack {
-            Toggle("Abrir ao iniciar", isOn: Binding(
+            Toggle("Launch at login", isOn: Binding(
                 get: { LaunchAtLogin.isEnabled },
                 set: { LaunchAtLogin.isEnabled = $0 }
             ))

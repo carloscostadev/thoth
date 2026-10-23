@@ -23,10 +23,10 @@ struct ProjectRankingView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            SectionHeader("Top Projetos · All Time")
+            SectionHeader("Top Projects · All Time")
 
             if ranking.isEmpty {
-                Text("Sem dados.")
+                Text("No data yet.")
                     .font(Theme.Font.caption)
                     .foregroundStyle(Theme.Palette.textTertiary)
             } else {
@@ -76,7 +76,7 @@ struct HeatmapView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            SectionHeader(title: "Heatmap · hora × dia") {
+            SectionHeader(title: "Heatmap · Hour × Day") {
                 legend
             }
 

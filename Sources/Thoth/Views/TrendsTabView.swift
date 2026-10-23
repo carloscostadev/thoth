@@ -10,9 +10,9 @@ struct TrendsTabView: View {
 
             HStack(spacing: Theme.Spacing.sm) {
                 MetricCardView(
-                    title: "Projeção Mês",
+                    title: "Month Projection",
                     value: String(format: "$%.2f", service.projectedMonthCost),
-                    subtitle: "Mtd + 7d avg"
+                    subtitle: "MTD + 7-day avg"
                 )
                 MetricCardView(
                     title: "Cost Saved",
@@ -22,13 +22,13 @@ struct TrendsTabView: View {
             }
 
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                SectionHeader(title: "Poupança Cache") {
+                SectionHeader(title: "Cache Savings") {
                     ThemeChip(text: "All Time", dot: Theme.Palette.positive)
                 }
                 Text(String(format: "$%.2f", service.cacheSavings))
                     .font(Theme.Font.metric)
                     .foregroundStyle(Theme.Palette.textPrimary)
-                Text("vs pricing sem cache")
+                Text("vs. pricing without cache")
                     .font(Theme.Font.caption)
                     .foregroundStyle(Theme.Palette.textTertiary)
             }
@@ -56,7 +56,7 @@ struct DailyCostChartView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            SectionHeader(title: "Custo diário · 30d") {
+            SectionHeader(title: "Daily Cost · 30d") {
                 Text(String(format: "Σ $%.2f", total))
                     .font(Theme.Font.captionNumber)
                     .foregroundStyle(Theme.Palette.textSecondary)
@@ -74,7 +74,7 @@ struct DailyCostChartView: View {
                             .foregroundStyle(Theme.Palette.textSecondary)
                     }
                 } else {
-                    Text("Clica numa barra para ver o dia")
+                    Text("Click a bar to see the day")
                         .font(Theme.Font.caption)
                         .foregroundStyle(Theme.Palette.textTertiary)
                 }
@@ -121,12 +121,14 @@ struct DailyCostChartView: View {
     private func shortDate(_ date: Date?) -> String {
         guard let date else { return "" }
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "d MMM"
         return f.string(from: date)
     }
 
     private func longDate(_ date: Date) -> String {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "EEE d MMM"
         return f.string(from: date)
     }
