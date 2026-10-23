@@ -26,7 +26,7 @@ struct MenuBarLabel: View {
     let service: ClaudeDataService
 
     var body: some View {
-        Image(systemName: "sparkle")
+        Image(systemName: "gauge.open.with.lines.needle.33percent")
             .symbolEffect(.pulse, options: .repeating, isActive: service.activityState != .sleep)
             .onAppear {
                 service.start()
