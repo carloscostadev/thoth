@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Thoth",
-    platforms: [.macOS(.v14)], // @Observable and symbolEffect
+    platforms: [.macOS(.v14)], // @Observable
     targets: [
         .executableTarget(
             name: "Thoth",

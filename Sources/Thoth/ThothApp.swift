@@ -26,8 +26,9 @@ struct MenuBarLabel: View {
     let service: ClaudeDataService
 
     var body: some View {
-        Image(systemName: "gauge.open.with.lines.needle.33percent")
-            .symbolEffect(.pulse, options: .repeating, isActive: service.activityState != .sleep)
+        // The Thoth symbol is a drawn template image, not an SF Symbol, so it takes
+        // no symbol effects: the activity state shows in the popover instead.
+        Image(nsImage: ThothMark.menuBarImage)
             .onAppear {
                 service.start()
             }

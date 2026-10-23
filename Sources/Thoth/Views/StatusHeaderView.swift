@@ -11,8 +11,7 @@ struct StatusHeaderView: View {
     var body: some View {
         VStack(spacing: Theme.Spacing.md) {
             HStack(spacing: Theme.Spacing.sm) {
-                Image(systemName: "gauge.open.with.lines.needle.33percent")
-                    .font(Theme.Font.title)
+                ThothGlyph(height: Theme.Size.headerMark)
                     .foregroundStyle(Theme.Palette.textPrimary)
                 Text("Thoth")
                     .font(Theme.Font.title)

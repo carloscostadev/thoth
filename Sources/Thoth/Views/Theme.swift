@@ -153,6 +153,8 @@ enum Theme {
         static let chartHeight: CGFloat = 88
         static let heatmapCellGap: CGFloat = 2
         static let hairline: CGFloat = 1
+        /// Visible height of the Thoth symbol in the popover header.
+        static let headerMark: CGFloat = 15
     }
 }
 
