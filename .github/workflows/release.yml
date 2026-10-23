@@ -87,7 +87,7 @@ jobs:
           </plist>
           PLIST
 
-          ditto -c -k --keepParent "$APP_BUNDLE" "$APP_NAME-$VERSION-mac.zip"
+          ditto -c -k --norsrc --noextattr --keepParent "$APP_BUNDLE" "$APP_NAME-$VERSION-mac.zip"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3

@@ -75,7 +75,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 PLIST
 
 rm -f "$ZIP_PATH"
-ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+ditto -c -k --norsrc --noextattr --keepParent "$APP_BUNDLE" "$ZIP_PATH"
 
 echo ""
 echo "Built successfully: $APP_BUNDLE"
