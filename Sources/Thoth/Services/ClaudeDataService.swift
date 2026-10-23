@@ -151,7 +151,7 @@ final class ClaudeDataService {
     /// is applied at aggregation time, so switching groups no longer invalidates caches.
     /// First-run still reads everything once; subsequent runs only touch files that grew
     /// or rotated.
-    private func unifiedFullScan() {
+    func unifiedFullScan() {
         let projectsDir = claudeDir + "/projects"
         guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
 
@@ -394,7 +394,7 @@ final class ClaudeDataService {
     // MARK: - Sessions
 
     /// Runs on analyticsQueue.
-    private func loadSessions() {
+    func loadSessions() {
         let sessionsDir = claudeDir + "/sessions"
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: sessionsDir) else { return }
 
@@ -432,7 +432,7 @@ final class ClaudeDataService {
     /// Runs on analyticsQueue. Reads only bytes appended to active-session JSONLs since the last
     /// poll (or the last heavy scan, whichever ran more recently). Aggregates the delta and dispatches
     /// the @Observable writes to the main thread in one batch.
-    private func pollActiveSessions() {
+    func pollActiveSessions() {
         var deltaUsages: [(TokenUsage, String)] = []
         let sampleAt = Date()
 
@@ -488,7 +488,7 @@ final class ClaudeDataService {
     /// On each tick, we only re-read files whose mtime advanced, and only the bytes appended since the
     /// last read. This replaces the previous full-file rescan that was burning ~25 MB/s on the main
     /// thread.
-    private func computeTodaySummaries() {
+    func computeTodaySummaries() {
         let projectsDir = claudeDir + "/projects"
         guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
 
