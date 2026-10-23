@@ -60,20 +60,39 @@ final class ClaudeDataService {
     var heatmapMax: Double = 0
 
     // Internal state — all of the below are owned by analyticsQueue (bg-only).
-    // The serial queue serialises access; never touch from main thread.
-    private var fileOffsets: [String: UInt64] = [:] // JSONL file -> last read position
-    private var bgActiveSessions: [SessionData] = []
-    private var todayFileCaches: [String: TodayFileCache] = [:]
-    private var todayCacheDay: Date? = nil
-    private var fullScanCaches: [String: FullFileCache] = [:]
+    // The serial queue serialises access; never touch from main thread. They are excluded from
+    // observation so background mutations never go through the SwiftUI observation registrar.
+    @ObservationIgnored private var pollCursors: [String: UsageLogCursor] = [:] // JSONL file -> read position
+    @ObservationIgnored private var bgActiveSessions: [SessionData] = []
+    @ObservationIgnored private var bgSelectedGroup: String? = nil
+    @ObservationIgnored private var bgDateFilter: DateFilter = .allTime
+    @ObservationIgnored private var sessionDirs: [String: String] = [:] // sessionId -> projects/<dir>
+    @ObservationIgnored private var todayFileCaches: [String: TodayFileCache] = [:]
+    @ObservationIgnored private var todayCacheDay: Date? = nil
+    @ObservationIgnored private var fullScanCaches: [String: FullFileCache] = [:]
 
     private struct TodayFileCache {
         var mtime: Date = .distantPast
-        var offset: UInt64 = 0
+        var cursor = UsageLogCursor()
         var cost: Double = 0
         var tokens: Int = 0
         var calls: Int = 0
         var activity = ActivityAggregator()
+        /// Latest assistant response. Its tool_use blocks may still be on lines not written yet,
+        /// so it is classified only once the next response starts (or provisionally when summed).
+        var pending: (tools: [String], cost: Double, tokens: Int)?
+
+        mutating func commitPending() {
+            guard let p = pending else { return }
+            activity.add(category: ActivityCategory.classify(tools: p.tools), cost: p.cost, tokens: p.tokens)
+            pending = nil
+        }
+
+        var activityIncludingPending: ActivityAggregator {
+            var copy = self
+            copy.commitPending()
+            return copy.activity
+        }
     }
 
     /// Per-file aggregate for the heavy scan. Stores only time-independent counts
@@ -97,9 +116,9 @@ final class ClaudeDataService {
         var totalCalls: Int = 0
     }
 
-    private var pollTimer: Timer?
-    private var sessionTimer: Timer?
-    private var analyticsTimer: Timer?
+    @ObservationIgnored private var pollTimer: Timer?
+    @ObservationIgnored private var sessionTimer: Timer?
+    @ObservationIgnored private var analyticsTimer: Timer?
     private let analyticsQueue = DispatchQueue(label: "com.carloscosta.thoth.analytics", qos: .utility)
 
     private let claudeDir: String
@@ -108,7 +127,11 @@ final class ClaudeDataService {
         self.claudeDir = claudeDir
     }
 
+    /// Main thread. Safe to call more than once (the menu bar label's onAppear can fire again);
+    /// only the first call schedules work.
     func start() {
+        guard pollTimer == nil else { return }
+
         // All file I/O runs on analyticsQueue (serial). The main thread is reserved for UI
         // and only receives final @Observable writes via DispatchQueue.main.async.
         analyticsQueue.async { [weak self] in
@@ -144,13 +167,16 @@ final class ClaudeDataService {
         pollTimer?.invalidate()
         sessionTimer?.invalidate()
         analyticsTimer?.invalidate()
+        pollTimer = nil
+        sessionTimer = nil
+        analyticsTimer = nil
     }
 
     /// Incremental heavy scan. Per-file aggregates are cached keyed by path; files whose
     /// (mtime, size) haven't changed are skipped without any I/O. The selectedGroup filter
     /// is applied at aggregation time, so switching groups no longer invalidates caches.
     /// First-run still reads everything once; subsequent runs only touch files that grew
-    /// or rotated.
+    /// or rotated. Runs on analyticsQueue.
     func unifiedFullScan() {
         let projectsDir = claudeDir + "/projects"
         guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
@@ -183,15 +209,18 @@ final class ClaudeDataService {
         // Prune entries for files that disappeared.
         for key in Array(fullScanCaches.keys) where !seenFiles.contains(key) {
             fullScanCaches.removeValue(forKey: key)
-            fileOffsets.removeValue(forKey: key)
+            pollCursors.removeValue(forKey: key)
         }
 
         // Pass 2: aggregate from caches. Filter by selectedGroup at this stage.
+        // Each window counts today as its first day, so "7 Days" is today plus the 6 days before
+        // (same convention as the 30-day window and chart).
         let today = cal.startOfDay(for: Date())
-        let weekStart = cal.date(byAdding: .day, value: -7, to: today)!
-        let fifteenStart = cal.date(byAdding: .day, value: -15, to: today)!
+        let weekStart = cal.date(byAdding: .day, value: -6, to: today)!
+        let fifteenStart = cal.date(byAdding: .day, value: -14, to: today)!
         let windowStart = cal.date(byAdding: .day, value: -29, to: today)!
         let monthStart = windowStart
+        let calendarMonthStart = cal.dateInterval(of: .month, for: today)?.start ?? today
 
         var aggregator = ModelUsageAggregator()
         var totalC = 0.0
@@ -200,6 +229,7 @@ final class ClaudeDataService {
         var fCost = 0.0, fCalls = 0, fTokens = 0
         var mCost = 0.0, mCalls = 0, mTokens = 0
         var aCost = 0.0, aCalls = 0, aTokens = 0
+        var monthToDate = 0.0
         var dayCosts: [Date: Double] = [:]
         var dayTokens: [Date: Int] = [:]
         var totalCacheRead = 0
@@ -208,7 +238,7 @@ final class ClaudeDataService {
         var projectCosts: [String: Double] = [:]
         var heat = Array(repeating: Array(repeating: 0.0, count: 24), count: 7)
 
-        let groupFilter = selectedGroup
+        let groupFilter = bgSelectedGroup
 
         for (_, cache) in fullScanCaches {
             if let group = groupFilter, cache.groupKey != group { continue }
@@ -236,6 +266,7 @@ final class ClaudeDataService {
                 if day >= monthStart { mCost += stats.cost; mCalls += stats.calls; mTokens += stats.tokens }
                 if day >= fifteenStart { fCost += stats.cost; fCalls += stats.calls; fTokens += stats.tokens }
                 if day >= weekStart { wCost += stats.cost; wCalls += stats.calls; wTokens += stats.tokens }
+                if day >= calendarMonthStart { monthToDate += stats.cost }
                 if day >= windowStart {
                     dayCosts[day, default: 0] += stats.cost
                     dayTokens[day, default: 0] += stats.tokens
@@ -264,9 +295,6 @@ final class ClaudeDataService {
         let monthRange = cal.range(of: .day, in: .month, for: Date()) ?? 1..<31
         let dayOfMonth = cal.component(.day, from: Date())
         let remaining = max(0, monthRange.upperBound - dayOfMonth - 1)
-        let monthToDate = series.reduce(0.0) { acc, point in
-            cal.isDate(point.date, equalTo: Date(), toGranularity: .month) ? acc + point.cost : acc
-        }
         let projection = monthToDate + last7 * Double(remaining)
 
         let denom = Double(totalInput + totalCacheRead)
@@ -311,7 +339,7 @@ final class ClaudeDataService {
                 stub.size = size
                 stub.groupKey = heuristicGroup
                 fullScanCaches[filePath] = stub
-                fileOffsets[filePath] = size
+                pollCursors[filePath] = UsageLogCursor(offset: size)
                 return
             }
 
@@ -319,59 +347,36 @@ final class ClaudeDataService {
             cache.mtime = mtime
             cache.size = UInt64(data.count)
             var fileCwd: String? = nil
+            var lastMessageId: String? = nil
 
-            let lines = String(data: data, encoding: .utf8)?.split(separator: "\n") ?? []
-            for line in lines {
-                guard let lineData = line.data(using: .utf8),
-                      let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
-
-                if fileCwd == nil, let cwd = json["cwd"] as? String {
-                    fileCwd = cwd
-                }
-
-                guard let message = json["message"] as? [String: Any],
-                      let model = message["model"] as? String,
-                      let usageDict = message["usage"] as? [String: Any],
-                      let pricing = ModelPricing.forModel(model) else { continue }
-
-                guard let timestamp = json["timestamp"] as? String,
-                      let d = Self.isoFormatter.date(from: timestamp) else { continue }
-
-                let inputTokens = usageDict["input_tokens"] as? Int ?? 0
-                let outputTokens = usageDict["output_tokens"] as? Int ?? 0
-                let cacheWrite = usageDict["cache_creation_input_tokens"] as? Int ?? 0
-                let cacheRead = usageDict["cache_read_input_tokens"] as? Int ?? 0
-                let cacheWrite1h = (usageDict["cache_creation"] as? [String: Any])?["ephemeral_1h_input_tokens"] as? Int ?? 0
-
-                let usage = TokenUsage(
-                    inputTokens: inputTokens,
-                    outputTokens: outputTokens,
-                    cacheWriteTokens: cacheWrite,
-                    cacheReadTokens: cacheRead,
-                    cacheWrite1hTokens: cacheWrite1h
-                )
-                let cost = usage.cost(for: model)
+            let consumed = UsageLogParser.parse(data, lastMessageId: &lastMessageId,
+                                                onCwd: { fileCwd = $0 }) { record in
+                guard let d = record.timestamp, let pricing = record.pricing else { return }
+                let usage = record.usage
+                let cost = record.cost
                 let toks = usage.totalTokens
 
                 cache.totalCost += cost
                 cache.totalTokens += toks
                 cache.totalCalls += 1
-                cache.sessionModels.insert(model)
+                cache.sessionModels.insert(record.model)
 
-                if var existing = cache.modelTokens[model] {
-                    existing.input += inputTokens
-                    existing.output += outputTokens
-                    existing.cacheWrite += cacheWrite
-                    existing.cacheRead += cacheRead
+                if var existing = cache.modelTokens[record.model] {
+                    existing.input += usage.inputTokens
+                    existing.output += usage.outputTokens
+                    existing.cacheWrite += usage.cacheWriteTokens
+                    existing.cacheRead += usage.cacheReadTokens
                     existing.cost += cost
-                    cache.modelTokens[model] = existing
+                    cache.modelTokens[record.model] = existing
                 } else {
-                    cache.modelTokens[model] = (inputTokens, outputTokens, cacheWrite, cacheRead, cost)
+                    cache.modelTokens[record.model] = (usage.inputTokens, usage.outputTokens,
+                                                       usage.cacheWriteTokens, usage.cacheReadTokens, cost)
                 }
 
-                cache.totalCacheRead += cacheRead
-                cache.totalInput += inputTokens
-                cache.savings += Double(cacheRead) * (pricing.inputPerMillion - pricing.cacheReadPerMillion) / 1_000_000.0
+                cache.totalCacheRead += usage.cacheReadTokens
+                cache.totalInput += usage.inputTokens
+                let rates = pricing.rates(forPromptTokens: usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)
+                cache.savings += Double(usage.cacheReadTokens) * (rates.input - rates.cacheRead) / 1_000_000.0
 
                 let day = cal.startOfDay(for: d)
                 if var existing = cache.perDay[day] {
@@ -390,7 +395,7 @@ final class ClaudeDataService {
 
             cache.groupKey = fileCwd.map(ProjectGroup.groupName(fromRealPath:)) ?? heuristicGroup
             fullScanCaches[filePath] = cache
-            fileOffsets[filePath] = cache.size
+            pollCursors[filePath] = UsageLogCursor(offset: UInt64(consumed), lastMessageId: lastMessageId)
         }
     }
 
@@ -418,6 +423,38 @@ final class ClaudeDataService {
         }
     }
 
+    /// Claude Code names a project's transcript folder after its cwd with every character other
+    /// than ASCII letters and digits (per UTF-16 unit) replaced by "-":
+    /// "/a/My Project_v1.2" -> "-a-My-Project-v1-2".
+    static func projectDirName(forCwd cwd: String) -> String {
+        let dash = UInt16(UInt8(ascii: "-"))
+        let units = cwd.utf16.map { unit -> UInt16 in
+            switch unit {
+            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A: return unit
+            default: return dash
+            }
+        }
+        return String(decoding: units, as: UTF16.self)
+    }
+
+    /// Runs on analyticsQueue. Resolves (and caches) the transcript folder of an active session:
+    /// the encoded cwd when it exists, otherwise whichever project folder holds `<sessionId>.jsonl`.
+    private func transcriptDir(for session: SessionData) -> String? {
+        if let cached = sessionDirs[session.sessionId] { return cached }
+        let projectsDir = claudeDir + "/projects"
+        var resolved: String? = nil
+        let encoded = projectsDir + "/" + Self.projectDirName(forCwd: session.cwd)
+        if FileManager.default.fileExists(atPath: encoded) {
+            resolved = encoded
+        } else if let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) {
+            resolved = dirs.lazy
+                .map { projectsDir + "/" + $0 }
+                .first { FileManager.default.fileExists(atPath: $0 + "/" + session.sessionId + ".jsonl") }
+        }
+        if let resolved { sessionDirs[session.sessionId] = resolved }
+        return resolved
+    }
+
     // MARK: - Project Groups
 
     /// Runs on analyticsQueue.
@@ -438,19 +475,21 @@ final class ClaudeDataService {
     func pollActiveSessions() {
         var deltaUsages: [(TokenUsage, String)] = []
         let sampleAt = Date()
+        let filterStart = bgDateFilter.startDate
 
         for session in bgActiveSessions {
-            let encodedCwd = session.cwd
-                .replacingOccurrences(of: "/", with: "-")
-            let dirPath = claudeDir + "/projects/" + encodedCwd
+            guard let dirPath = transcriptDir(for: session) else { continue }
 
             // Match both `<sessionId>.jsonl` (main transcript) and `<sessionId>/subagents/*.jsonl`
             // (Agent-tool sub-runs) — both contain the session id somewhere in the path.
             for filePath in enumerateJSONLs(in: dirPath) where filePath.contains(session.sessionId) {
-                let offset = fileOffsets[filePath] ?? 0
-                let (usages, newOffset) = parseJSONL(at: filePath, fromOffset: offset)
-                fileOffsets[filePath] = newOffset
-                deltaUsages.append(contentsOf: usages)
+                var cursor = pollCursors[filePath] ?? UsageLogCursor()
+                readAppendedLines(of: filePath, cursor: &cursor) { record in
+                    guard record.pricing != nil else { return }
+                    if let filterStart, let date = record.timestamp, date < filterStart { return }
+                    deltaUsages.append((record.usage, record.model))
+                }
+                pollCursors[filePath] = cursor
             }
         }
 
@@ -467,6 +506,20 @@ final class ClaudeDataService {
         }
     }
 
+    /// Runs on analyticsQueue. Parses the complete lines appended to `path` after `cursor` and
+    /// advances it. A line still being written is left for the next call.
+    private func readAppendedLines(of path: String, cursor: inout UsageLogCursor,
+                                   onContinuation: ((_ toolNames: [String]) -> Void)? = nil,
+                                   onRecord: (UsageRecord) -> Void) {
+        guard let fh = FileHandle(forReadingAtPath: path) else { return }
+        defer { try? fh.close() }
+        guard (try? fh.seek(toOffset: cursor.offset)) != nil,
+              let data = try? fh.readToEnd(), !data.isEmpty else { return }
+        let consumed = UsageLogParser.parse(data, lastMessageId: &cursor.lastMessageId,
+                                            onContinuation: onContinuation, onRecord: onRecord)
+        cursor.offset += UInt64(consumed)
+    }
+
     /// Returns absolute paths of every `.jsonl` file under `dir`, descending into subdirectories.
     /// Claude Code stores sub-agent transcripts at `<dir>/<sessionId>/subagents/agent-*.jsonl`,
     /// so a one-level scan misses the majority of usage data on heavy users of the Agent tool.
@@ -480,12 +533,6 @@ final class ClaudeDataService {
         }
         return result
     }
-
-    private static let isoFormatter: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
 
     /// Runs on analyticsQueue. Incremental: per-file cache keyed by path stores (mtime, offset, aggregates).
     /// On each tick, we only re-read files whose mtime advanced, and only the bytes appended since the
@@ -505,9 +552,10 @@ final class ClaudeDataService {
         }
 
         var seenFiles: Set<String> = []
+        let groupFilter = bgSelectedGroup
 
         for dir in dirs {
-            if let group = selectedGroup {
+            if let group = groupFilter {
                 let decoded = ProjectGroup.decodePath(dir)
                 let dirGroup = ProjectGroup.groupName(from: decoded)
                 if dirGroup != group { continue }
@@ -528,76 +576,33 @@ final class ClaudeDataService {
 
                 // File shrunk (rotated/truncated) → discard cache and start over.
                 let currentSize: UInt64 = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
-                if currentSize < cache.offset {
+                if currentSize < cache.cursor.offset {
                     cache = TodayFileCache()
                 }
 
+                var cursor = cache.cursor
                 autoreleasepool {
+                    readAppendedLines(of: filePath, cursor: &cursor, onContinuation: { tools in
+                        cache.pending?.tools.append(contentsOf: tools)
+                    }) { record in
+                        cache.commitPending()
+                        guard record.pricing != nil else { return }
+                        // Skip entries from before today (file may straddle midnight on first scan).
+                        if let date = record.timestamp, date < todayStart { return }
 
-                guard let fh = FileHandle(forReadingAtPath: filePath) else { return }
-                defer { try? fh.close() }
-                do { try fh.seek(toOffset: cache.offset) } catch { return }
-                guard let data = try? fh.readToEnd(), !data.isEmpty else {
-                    cache.mtime = mtime
-                    todayFileCaches[filePath] = cache
-                    return
-                }
-                let newOffset = cache.offset + UInt64(data.count)
-
-                let lines = String(data: data, encoding: .utf8)?.split(separator: "\n") ?? []
-                for line in lines {
-                    guard let lineData = line.data(using: .utf8),
-                          let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                          let message = json["message"] as? [String: Any],
-                          let model = message["model"] as? String,
-                          let usageDict = message["usage"] as? [String: Any],
-                          ModelPricing.forModel(model) != nil else { continue }
-
-                    // Skip entries from before today (file may straddle midnight on first scan).
-                    if let timestamp = json["timestamp"] as? String,
-                       let date = Self.isoFormatter.date(from: timestamp),
-                       date < todayStart {
-                        continue
-                    }
-
-                    let inputTokens = usageDict["input_tokens"] as? Int ?? 0
-                    let outputTokens = usageDict["output_tokens"] as? Int ?? 0
-                    let cacheWrite = usageDict["cache_creation_input_tokens"] as? Int ?? 0
-                    let cacheRead = usageDict["cache_read_input_tokens"] as? Int ?? 0
-                    let cacheWrite1h = (usageDict["cache_creation"] as? [String: Any])?["ephemeral_1h_input_tokens"] as? Int ?? 0
-
-                    let usage = TokenUsage(
-                        inputTokens: inputTokens,
-                        outputTokens: outputTokens,
-                        cacheWriteTokens: cacheWrite,
-                        cacheReadTokens: cacheRead,
-                        cacheWrite1hTokens: cacheWrite1h
-                    )
-                    let lineCost = usage.cost(for: model)
-                    cache.cost += lineCost
-                    cache.tokens += usage.totalTokens
-                    cache.calls += 1
-
-                    if (json["type"] as? String) == "assistant" {
-                        var toolNames: [String] = []
-                        if let content = message["content"] as? [[String: Any]] {
-                            for block in content {
-                                if let blockType = block["type"] as? String, blockType == "tool_use",
-                                   let name = block["name"] as? String {
-                                    toolNames.append(name)
-                                }
-                            }
+                        let lineCost = record.cost
+                        let tokens = record.usage.totalTokens
+                        cache.cost += lineCost
+                        cache.tokens += tokens
+                        cache.calls += 1
+                        if record.isAssistant {
+                            cache.pending = (record.toolNames, lineCost, tokens)
                         }
-                        let category = ActivityCategory.classify(tools: toolNames)
-                        cache.activity.add(category: category, cost: lineCost, tokens: usage.totalTokens)
                     }
                 }
-
-                cache.offset = newOffset
+                cache.cursor = cursor
                 cache.mtime = mtime
                 todayFileCaches[filePath] = cache
-
-                } // autoreleasepool
             }
         }
 
@@ -614,7 +619,7 @@ final class ClaudeDataService {
             sumCost += c.cost
             sumTokens += c.tokens
             sumCalls += c.calls
-            sumActivity.merge(c.activity)
+            sumActivity.merge(c.activityIncludingPending)
         }
 
         DispatchQueue.main.async { [weak self] in
@@ -626,63 +631,12 @@ final class ClaudeDataService {
         }
     }
 
-    private func parseJSONL(at path: String, fromOffset: UInt64) -> ([(TokenUsage, String)], UInt64) {
-        guard let fileHandle = FileHandle(forReadingAtPath: path) else { return ([], fromOffset) }
-        defer { try? fileHandle.close() }
-
-        fileHandle.seek(toFileOffset: fromOffset)
-        guard let data = try? fileHandle.readToEnd(), !data.isEmpty else {
-            return ([], fromOffset)
-        }
-
-        let newOffset = fromOffset + UInt64(data.count)
-        var results: [(TokenUsage, String)] = []
-        let filterStart = dateFilter.startDate
-
-        let lines = String(data: data, encoding: .utf8)?.split(separator: "\n") ?? []
-        for line in lines {
-            guard let lineData = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                  let message = json["message"] as? [String: Any],
-                  let model = message["model"] as? String,
-                  let usageDict = message["usage"] as? [String: Any] else { continue }
-
-            // Skip synthetic/unknown models
-            guard ModelPricing.forModel(model) != nil else { continue }
-
-            // Apply date filter
-            if let filterStart = filterStart,
-               let timestamp = json["timestamp"] as? String,
-               let date = Self.isoFormatter.date(from: timestamp),
-               date < filterStart {
-                continue
-            }
-
-            let inputTokens = usageDict["input_tokens"] as? Int ?? 0
-            let outputTokens = usageDict["output_tokens"] as? Int ?? 0
-            let cacheWrite = usageDict["cache_creation_input_tokens"] as? Int ?? 0
-            let cacheRead = usageDict["cache_read_input_tokens"] as? Int ?? 0
-            let cacheWrite1h = (usageDict["cache_creation"] as? [String: Any])?["ephemeral_1h_input_tokens"] as? Int ?? 0
-
-            let usage = TokenUsage(
-                inputTokens: inputTokens,
-                outputTokens: outputTokens,
-                cacheWriteTokens: cacheWrite,
-                cacheReadTokens: cacheRead,
-                cacheWrite1hTokens: cacheWrite1h
-            )
-            results.append((usage, model))
-        }
-
-        return (results, newOffset)
-    }
-
-
     func applyFilter(_ group: String?) {
         selectedGroup = group
         burnRateTracker = BurnRateTracker()
         analyticsQueue.async { [weak self] in
             guard let self else { return }
+            self.bgSelectedGroup = group
             // Heavy-scan caches are aggregation-time filterable, so they survive group changes.
             // Today's caches filter at directory level — drop them so the next tick rebuilds for the new group.
             self.todayFileCaches.removeAll()
@@ -695,6 +649,7 @@ final class ClaudeDataService {
         dateFilter = filter
         burnRateTracker = BurnRateTracker()
         analyticsQueue.async { [weak self] in
+            self?.bgDateFilter = filter
             self?.unifiedFullScan()
         }
     }
