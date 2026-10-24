@@ -154,7 +154,12 @@ struct ThothLockup: View {
     var body: some View {
         let ink = ThothMark.lockupInkRect
         let scale = height / ink.height
+        // The ink touches the box on every side (last H, round caps). Draw into a canvas
+        // 2 units larger all round and take that margin back out of the layout, so the
+        // canvas never clips the anti-aliased edges.
+        let margin = 2 * scale
         Canvas { context, _ in
+            context.translateBy(x: margin, y: margin)
             context.scaleBy(x: scale, y: scale)
             context.translateBy(x: -ink.minX, y: -ink.minY)
             context.stroke(Path(ThothMark.centerline), with: .foreground,
@@ -163,7 +168,8 @@ struct ThothLockup: View {
             context.scaleBy(x: ThothMark.wordmarkScale, y: ThothMark.wordmarkScale)
             context.fill(Path(ThothMark.wordmark), with: .foreground)
         }
-        .frame(width: ink.width * scale, height: height)
+        .frame(width: ink.width * scale + 2 * margin, height: height + 2 * margin)
+        .padding(-margin)
         .accessibilityElement()
         .accessibilityLabel("Thoth")
     }
