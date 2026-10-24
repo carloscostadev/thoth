@@ -101,7 +101,6 @@ enum Theme {
         static let hero = SwiftUI.Font.system(size: 40, weight: .regular).monospacedDigit()
         /// Prominent numbers inside cards.
         static let metric = SwiftUI.Font.system(size: 22, weight: .regular).monospacedDigit()
-        static let title = SwiftUI.Font.system(size: 13, weight: .medium)
         static let body = SwiftUI.Font.system(size: 12, weight: .regular)
         static let bodyEmphasis = SwiftUI.Font.system(size: 12, weight: .medium)
         /// Numeric values in rows.
@@ -153,8 +152,9 @@ enum Theme {
         static let chartHeight: CGFloat = 88
         static let heatmapCellGap: CGFloat = 2
         static let hairline: CGFloat = 1
-        /// Visible height of the Thoth symbol in the popover header.
-        static let headerMark: CGFloat = 15
+        /// Visible height of the symbol in the popover header's lockup; the wordmark
+        /// comes out about half as tall, large enough for its cut to read.
+        static let headerMark: CGFloat = 20
     }
 }
 

@@ -11,10 +11,7 @@ struct StatusHeaderView: View {
     var body: some View {
         VStack(spacing: Theme.Spacing.md) {
             HStack(spacing: Theme.Spacing.sm) {
-                ThothGlyph(height: Theme.Size.headerMark)
-                    .foregroundStyle(Theme.Palette.textPrimary)
-                Text("Thoth")
-                    .font(Theme.Font.title)
+                ThothLockup(height: Theme.Size.headerMark)
                     .foregroundStyle(Theme.Palette.textPrimary)
                 Spacer()
                 ThemeChip(
