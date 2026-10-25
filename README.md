@@ -40,11 +40,14 @@ from `~/.claude/`.
   subscription bills you.
 - **Trends tab.** Last-30-days daily cost chart, projected month-end cost and
   prompt-cache savings.
-- **Projects tab.** Top projects by cost (resolved from each session's `cwd`,
-  not just the encoded folder name), plus a weekday × hour heatmap of when
-  you burn the most.
+- **Projects tab.** Top projects by cost (resolved from each session's first
+  `cwd`, not just the encoded folder name; git worktrees, Horus parallel
+  worktrees and Claude Code scratchpads count under their project), plus a
+  weekday × hour heatmap of when you burn the most.
 - **Project filter (not in the UI yet).** The data layer can slice every
   number by project group, but the picker isn't wired into the popover.
+- **Menu bar mark.** Full while Claude Code is working, dimmed while it
+  sleeps. No animation, so it costs nothing between state changes.
 - **Launch at login.** Optional, toggled from the popover.
 
 ## How it works
@@ -53,8 +56,9 @@ Claude Code writes one JSONL file per session under
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. Thoth polls that
 tree and the `~/.claude/sessions/*.json` heartbeats, aggregates the
 `message.usage` of every API response, and prices it against a built-in rate
-card. Claude Code writes one line per content block and repeats the same
-usage on each, so every response is counted once.
+card. Claude Code writes one line per content block with the same
+`message.id`, and streams `output_tokens` up to the final count on the last
+one, so every response is counted once, with its final values.
 
 To stay cheap on a large history (the author's local tree is ~450 MB across
 ~600 files), scanning is layered:
@@ -62,16 +66,18 @@ To stay cheap on a large history (the author's local tree is ~450 MB across
 - **Active-session poll** every 5 s. Reads only bytes appended since the last
   poll, on a background queue.
 - **Today summary** every 5 s. Per-file incremental cache keyed by mtime;
-  unchanged files are skipped without I/O.
+  unchanged files are skipped without I/O. The projects tree is walked at most
+  once a minute; in between, only files already written today are checked.
 - **Heavy scan** every 5 min. Per-file aggregate cache keyed by `(mtime,
   size)`. Files that haven't changed contribute their cached numbers without
-  being re-parsed. Period buckets (week / 15d / month) are derived from a
+  being re-parsed, and a file that grew is read only from where the last scan
+  stopped. Period buckets (week / 15d / month) are derived from a
   per-day breakdown at aggregation time, so the calendar can advance without
-  invalidating caches. Switching the project filter is aggregation-time too,
-  so it doesn't re-read any files. On a cold start, files are parsed in
-  parallel.
+  invalidating caches; a time zone change rebuilds them once. Switching the
+  project filter is aggregation-time too, so it doesn't re-read any files. On
+  a cold start, files are parsed in parallel.
 
-Files are read in fixed-size chunks and only lines carrying `usage` are
+Files are read in 256 KB chunks and only lines carrying `usage` are
 JSON-decoded. All file I/O and parsing is driven from a dedicated background
 queue; the main thread is reserved for SwiftUI updates.
 
@@ -96,6 +102,10 @@ open Package.swift
 
 # Or build and run from the terminal
 ./scripts/dev.sh
+
+# Run a side-by-side "Thoth Design" copy (own bundle id, lives in build/)
+# next to the installed Thoth, e.g. to try UI changes
+./scripts/dev-design.sh
 
 # Build a release .app bundle (universal: arm64 + x86_64) into build/
 ./scripts/build.sh
