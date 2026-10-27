@@ -1,0 +1,8 @@
+{
+  "description": "A session read while Claude Code writes it: the incremental tests cut it mid-line and between the streamed lines of one response, and the totals must match a single read.",
+  "calls": 3,
+  "tokens": { "input": 55, "output": 615, "cacheWrite": 0, "cacheRead": 8000 },
+  "cost": 0.01206,
+  "models": ["claude-opus-5-5", "claude-sonnet-5-5"],
+  "ignored": { "malformed": 0, "incomplete": 0 }
+}

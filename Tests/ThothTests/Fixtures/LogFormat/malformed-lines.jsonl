@@ -1,0 +1,13 @@
+{"type":"user","cwd":"/srv/fixture/app","sessionId":"00000000-0000-4000-8000-000000000001","timestamp":"2026-10-20T10:00:00.000Z","message":{"role":"user","content":"fixture prompt"}}
+{"parentUuid":null,"isSidechain":false,"cwd":"/srv/fixture/app","sessionId":"00000000-0000-4000-8000-000000000001","type":"assistant","timestamp":"2026-10-20T10:00:01.000Z","requestId":"req_m1","message":{"id":"msg_m1","type":"message","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"fixture answer"}],"usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":2000}}}
+{"type":"assistant","timestamp":"2026-10-20T10:00:05.000Z","requestId":"req_m2","message":{"id":"msg_m2","model":"claude-opus-5-5","usage":{"input_tokens":50
+this is not json at all
+
+   	
+[1,2,3]
+{"type":"user","message":{"role":"user","content":"a write cut
+{"type":"assistant","message":{"id":"msg_m3","model":"claude-opus-5-5","usage":{"input_tokens":1}},"dangling"}
+{"type":"user","message":{"content":"merged"}}{"type":"assistant","message":{"id":"msg_m4","model":"claude-opus-5-5","usage":{"input_tokens":7,"output_tokens":7}}}
+{"type":"assistant","timestamp":"2026-10-20T10:00:09.000Z","requestId":"req_m5","message":{"id":"msg_m5","model":"claude-sonnet-5-5","content":[{"type":"text","text":"fixture answer"}],"usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":1000,"output_tokens":300}}}
+}
+{"type":"assistant","timestamp":"2026-10-20T10:00:12.000Z","message":{"id":"msg_m6"

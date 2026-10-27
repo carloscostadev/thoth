@@ -1,0 +1,9 @@
+{
+  "description": "Usage without cache fields or output_tokens, a streamed response without message.id (deduplicated by requestId), lines without model / with usage null / with a string token count (incomplete), no timestamp (undated), no record type, no content.",
+  "calls": 6,
+  "tokens": { "input": 141, "output": 261, "cacheWrite": 0, "cacheRead": 0 },
+  "cost": 0.004612,
+  "models": ["claude-opus-5-5", "claude-sonnet-5-5"],
+  "undatedCalls": 1,
+  "ignored": { "malformed": 0, "incomplete": 3 }
+}

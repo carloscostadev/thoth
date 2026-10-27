@@ -1,0 +1,8 @@
+{
+  "description": "Unknown fields at every level (top level, message, usage, cache_creation), unknown content block types, content as an object, a numeric message id and a numeric record type. Nothing is lost; msg_u1 counts once.",
+  "calls": 4,
+  "tokens": { "input": 1210, "output": 2410, "cacheWrite": 2000, "cacheRead": 5000 },
+  "cost": 0.03652,
+  "models": ["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"],
+  "ignored": { "malformed": 0, "incomplete": 0 }
+}

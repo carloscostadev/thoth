@@ -1,0 +1,9 @@
+{
+  "description": "Future versions of known families are priced with the newest known version of the family (opus 6 -> Opus 5.5, sonnet 7.2 -> Sonnet 5.5, haiku 6 -> Haiku 5.5, fable 9.9 -> Fable 5.1) and get their own row. Ids of an unknown family, <synthetic> and other vendors have no price and are left out of the totals (unpricedCalls).",
+  "calls": 5,
+  "tokens": { "input": 3200, "output": 3200, "cacheWrite": 0, "cacheRead": 0 },
+  "cost": 0.045,
+  "models": ["claude-fable-9-9", "claude-haiku-6", "claude-opus-5-5", "claude-opus-6", "claude-sonnet-7-2"],
+  "unpricedCalls": 3,
+  "ignored": { "malformed": 0, "incomplete": 0 }
+}

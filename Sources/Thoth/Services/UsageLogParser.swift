@@ -53,6 +53,15 @@ struct UsageLogCursor {
     var open: OpenResponse?
 }
 
+/// A line the parser could not use. Lines without a `"usage":` key are only checked for shape
+/// (one JSON object per line), not decoded.
+enum IgnoredLine: Equatable {
+    /// Not a JSON object (garbage, a truncated write), or a `"usage":` line that fails to decode.
+    case malformed
+    /// Its `message` has a `usage` key, but no model or a usage that can't be read.
+    case incomplete
+}
+
 enum UsageLogParser {
     /// Parses the complete lines of `data`. Bytes after the last newline are a line Claude Code is
     /// still writing; they are not consumed so the next read starts at the beginning of that line.
@@ -69,6 +78,7 @@ enum UsageLogParser {
     ///
     /// Only lines containing a `"usage":` key are decoded (plus the first line with a `"cwd":`
     /// key when `onCwd` is set); user turns and tool results are skipped without JSON parsing.
+    /// Lines that can't be used go to `onIgnored` (see `IgnoredLine`); blank lines are not reported.
     /// Thread-safe: no shared mutable state. Returns the bytes consumed.
     @discardableResult
     static func parse(
@@ -76,6 +86,7 @@ enum UsageLogParser {
         open: inout OpenResponse?,
         onCwd: ((String) -> Void)? = nil,
         onContinuation: ((_ toolNames: [String]) -> Void)? = nil,
+        onIgnored: ((IgnoredLine) -> Void)? = nil,
         onRecord: (UsageRecord) -> Void
     ) -> Int {
         var state = ParseState(open: open, wantCwd: onCwd != nil)
@@ -86,7 +97,8 @@ enum UsageLogParser {
                   let nl = memchr(base + lineStart, 0x0A, raw.count - lineStart) {
                 let lineEnd = base.distance(to: UnsafeRawPointer(nl))
                 handleLine(UnsafeRawBufferPointer(start: base + lineStart, count: lineEnd - lineStart),
-                           state: &state, onCwd: onCwd, onContinuation: onContinuation, onRecord: onRecord)
+                           state: &state, onCwd: onCwd, onContinuation: onContinuation,
+                           onIgnored: onIgnored, onRecord: onRecord)
                 lineStart = lineEnd + 1
             }
             return lineStart
@@ -106,6 +118,7 @@ enum UsageLogParser {
         chunkSize: Int = 256 << 10,
         onCwd: ((String) -> Void)? = nil,
         onContinuation: ((_ toolNames: [String]) -> Void)? = nil,
+        onIgnored: ((IgnoredLine) -> Void)? = nil,
         onRecord: (UsageRecord) -> Void
     ) -> UInt64? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
@@ -146,7 +159,8 @@ enum UsageLogParser {
                 }
                 let consumed = parse(buffer, open: &cursor.open,
                                      onCwd: onCwd == nil || cwdFound ? nil : reportCwd,
-                                     onContinuation: onContinuation, onRecord: onRecord)
+                                     onContinuation: onContinuation, onIgnored: onIgnored,
+                                     onRecord: onRecord)
                 cursor.offset += UInt64(consumed)
                 if consumed == buffer.count {
                     carry = Data()
@@ -187,9 +201,18 @@ enum UsageLogParser {
         state: inout ParseState,
         onCwd: ((String) -> Void)?,
         onContinuation: ((_ toolNames: [String]) -> Void)?,
+        onIgnored: ((IgnoredLine) -> Void)?,
         onRecord: (UsageRecord) -> Void
     ) {
-        guard line.count > 2, let base = line.baseAddress else { return }
+        guard let base = line.baseAddress, line.count > 0 else { return }
+        // One JSON object per line; anything else is garbage or a write cut short.
+        let isWhitespace = { (b: UInt8) in b == 0x20 || b == 0x09 || b == 0x0D }
+        guard let first = line.firstIndex(where: { !isWhitespace($0) }) else { return }
+        let last = line.lastIndex(where: { !isWhitespace($0) })!
+        guard line[first] == UInt8(ascii: "{"), line[last] == UInt8(ascii: "}"), last > first else {
+            onIgnored?(.malformed)
+            return
+        }
         let bytes = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: base), count: line.count, deallocator: .none)
 
         if state.wantCwd, contains(line, cwdKey),
@@ -198,15 +221,24 @@ enum UsageLogParser {
             state.wantCwd = false
         }
 
-        guard contains(line, usageKey),
-              let entry = try? state.decoder.decode(LogLine.self, from: bytes),
-              let message = entry.message,
-              let model = message.model,
-              let usage = message.usage else { return }
+        guard contains(line, usageKey) else { return }
+        guard let entry = try? state.decoder.decode(LogLine.self, from: bytes) else {
+            onIgnored?(.malformed)
+            return
+        }
+        // A "usage" key elsewhere (a tool input, another record type) is not an API response.
+        guard let message = entry.message, message.hasUsage else { return }
+        guard let model = message.model, let usage = message.usage else {
+            onIgnored?(.incomplete)
+            return
+        }
 
         let toolNames = message.content?.compactMap { $0.type == "tool_use" ? $0.name : nil } ?? []
+        // The request id stands in for a missing message id: both are repeated on every line
+        // of a streamed response.
+        let responseId = message.id ?? entry.requestId
 
-        if let id = message.id, var open = state.open, open.id == id {
+        if let id = responseId, var open = state.open, open.id == id {
             onContinuation?(toolNames)
             // Later lines of a streamed response repeat its usage with more output; count the
             // growth. A line with less output than already counted is stale and ignored.
@@ -238,7 +270,7 @@ enum UsageLogParser {
         }
 
         let record = UsageRecord(
-            messageId: message.id,
+            messageId: responseId,
             model: model,
             pricing: pricing,
             usage: usage,
@@ -246,7 +278,7 @@ enum UsageLogParser {
             isAssistant: entry.type == "assistant",
             toolNames: toolNames
         )
-        state.open = message.id.map {
+        state.open = responseId.map {
             OpenResponse(id: $0, model: model, pricing: pricing, timestamp: record.timestamp,
                          isAssistant: record.isAssistant, usage: usage, cost: record.cost)
         }
@@ -262,12 +294,26 @@ enum UsageLogParser {
     private struct LogLine: Decodable {
         let type: String?
         let timestamp: String?
+        let requestId: String?
         let message: Message?
+
+        enum CodingKeys: String, CodingKey { case type, timestamp, requestId, message }
+
+        // A field of an unexpected type is treated as missing rather than rejecting the line.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            type = try? c.decodeIfPresent(String.self, forKey: .type)
+            timestamp = try? c.decodeIfPresent(String.self, forKey: .timestamp)
+            requestId = try? c.decodeIfPresent(String.self, forKey: .requestId)
+            message = try? c.decodeIfPresent(Message.self, forKey: .message)
+        }
     }
 
     private struct Message: Decodable {
         let id: String?
         let model: String?
+        /// The message has a `usage` key, readable or not.
+        let hasUsage: Bool
         let usage: TokenUsage?
         let content: [ContentBlock]?
 
@@ -277,6 +323,7 @@ enum UsageLogParser {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             id = try? c.decodeIfPresent(String.self, forKey: .id)
             model = try? c.decodeIfPresent(String.self, forKey: .model)
+            hasUsage = c.contains(.usage)
             usage = try? c.decodeIfPresent(TokenUsage.self, forKey: .usage)
             // User turns can carry a plain string here; only block arrays matter.
             content = try? c.decodeIfPresent([ContentBlock].self, forKey: .content)
@@ -297,8 +344,16 @@ enum UsageLogParser {
         return f
     }()
 
+    /// The formatter above rejects timestamps without a fractional part.
+    nonisolated(unsafe) private static let isoFormatterWholeSeconds: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
     /// Fast path for the `YYYY-MM-DDTHH:MM:SS.sssZ` form Claude Code writes (JavaScript's
-    /// `toISOString`); anything else goes through ISO8601DateFormatter.
+    /// `toISOString`); anything else (other fractions, whole seconds, a UTC offset) goes through
+    /// ISO8601DateFormatter. A timestamp without a zone is ambiguous and returns nil.
     static func parseTimestamp(_ string: String) -> Date? {
         var s = string
         let fast: Date? = s.withUTF8 { u -> Date? in
@@ -329,6 +384,6 @@ enum UsageLogParser {
             let seconds = Double(days * 86_400 + hour * 3_600 + minute * 60 + second) + Double(millis) / 1_000
             return Date(timeIntervalSince1970: seconds)
         }
-        return fast ?? isoFormatter.date(from: string)
+        return fast ?? isoFormatter.date(from: string) ?? isoFormatterWholeSeconds.date(from: string)
     }
 }

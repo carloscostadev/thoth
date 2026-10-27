@@ -1,0 +1,8 @@
+{
+  "description": "Truncated writes, garbage, a JSON array, two objects on one line, a lone brace, blank lines, a CRLF line and an unfinished last line. Only msg_m1 and msg_m5 count.",
+  "calls": 2,
+  "tokens": { "input": 1100, "output": 2300, "cacheWrite": 0, "cacheRead": 1000 },
+  "cost": 0.0473,
+  "models": ["claude-opus-5-5", "claude-sonnet-5-5"],
+  "ignored": { "malformed": 7, "incomplete": 0 }
+}

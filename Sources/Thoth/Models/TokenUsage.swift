@@ -56,6 +56,7 @@ struct TokenUsage: Codable, Equatable {
     }
 
     private enum CacheCreationKeys: String, CodingKey {
+        case fiveMinutes = "ephemeral_5m_input_tokens"
         case oneHour = "ephemeral_1h_input_tokens"
     }
 
@@ -63,10 +64,13 @@ struct TokenUsage: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         inputTokens = try c.decodeIfPresent(Int.self, forKey: .inputTokens) ?? 0
         outputTokens = try c.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0
-        cacheWriteTokens = try c.decodeIfPresent(Int.self, forKey: .cacheWriteTokens) ?? 0
         cacheReadTokens = try c.decodeIfPresent(Int.self, forKey: .cacheReadTokens) ?? 0
         let creation = try? c.nestedContainer(keyedBy: CacheCreationKeys.self, forKey: .cacheCreation)
+        let fiveMinutes = (try? creation?.decodeIfPresent(Int.self, forKey: .fiveMinutes)) ?? 0
         cacheWrite1hTokens = (try? creation?.decodeIfPresent(Int.self, forKey: .oneHour)) ?? 0
+        // Without the flat total, the breakdown is all there is to count.
+        cacheWriteTokens = try c.decodeIfPresent(Int.self, forKey: .cacheWriteTokens)
+            ?? fiveMinutes + cacheWrite1hTokens
     }
 
     func encode(to encoder: Encoder) throws {

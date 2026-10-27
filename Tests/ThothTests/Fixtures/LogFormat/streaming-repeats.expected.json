@@ -1,0 +1,8 @@
+{
+  "description": "A response streamed over five lines with the same message id and request id: output grows, then an identical copy and a stale copy with less output. Then a response written twice and a single-line one. Three calls, each with its final usage.",
+  "calls": 3,
+  "tokens": { "input": 65, "output": 315, "cacheWrite": 3000, "cacheRead": 21000 },
+  "cost": 0.02496,
+  "models": ["claude-opus-5-5", "claude-sonnet-5-5"],
+  "ignored": { "malformed": 0, "incomplete": 0 }
+}

@@ -12,7 +12,9 @@ let package = Package(
         .testTarget(
             name: "ThothTests",
             dependencies: ["Thoth"],
-            path: "Tests/ThothTests"
+            path: "Tests/ThothTests",
+            // Synthetic JSONL transcripts for the log format compatibility tests.
+            resources: [.copy("Fixtures")]
         )
     ],
     // Swift 6 strict concurrency is not adopted yet; keep the Swift 5 language mode.

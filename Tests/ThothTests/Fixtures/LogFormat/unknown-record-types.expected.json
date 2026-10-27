@@ -1,0 +1,8 @@
+{
+  "description": "Record types Thoth doesn't know. A usage key outside message.usage (telemetry, a nested subagent progress copy, a cost snapshot) is not a response and not an error; an unknown type that does carry message.usage counts, so nothing is lost.",
+  "calls": 2,
+  "tokens": { "input": 200, "output": 200, "cacheWrite": 0, "cacheRead": 0 },
+  "cost": 0.0036,
+  "models": ["claude-opus-5-5", "claude-sonnet-5-5"],
+  "ignored": { "malformed": 0, "incomplete": 0 }
+}

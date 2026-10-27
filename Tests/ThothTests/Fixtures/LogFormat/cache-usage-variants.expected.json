@@ -1,0 +1,8 @@
+{
+  "description": "Cache fields absent, zero and null; cache writes split between the 5-minute and 1-hour caches; only the cache_creation breakdown (no flat total), counted from the breakdown; only the flat total, billed at the 5-minute rate.",
+  "calls": 6,
+  "tokens": { "input": 300, "output": 300, "cacheWrite": 3000, "cacheRead": 2000 },
+  "cost": 0.0274,
+  "models": ["claude-opus-5-5"],
+  "ignored": { "malformed": 0, "incomplete": 0 }
+}

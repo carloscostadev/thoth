@@ -1,0 +1,8 @@
+{
+  "description": "Compaction records (summary lines, a compact_boundary system line with preTokens, a compact-summary user turn quoting a usage object) carry no billable usage; the responses before and after count once each.",
+  "calls": 2,
+  "tokens": { "input": 320, "output": 730, "cacheWrite": 4000, "cacheRead": 10000 },
+  "cost": 0.02494,
+  "models": ["claude-sonnet-5-5"],
+  "ignored": { "malformed": 0, "incomplete": 0 }
+}

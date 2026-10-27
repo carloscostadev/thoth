@@ -1,0 +1,9 @@
+{
+  "description": "A subagent transcript (isSidechain, agentId) stored where Claude Code puts it, under <session>/subagents/. msg_a2 has a prompt over 100k tokens, billed at Haiku 5.5's long-prompt rates.",
+  "path": "00000000-0000-4000-8000-000000000003/subagents/agent-a1b2c3.jsonl",
+  "calls": 2,
+  "tokens": { "input": 122000, "output": 220, "cacheWrite": 500, "cacheRead": 0 },
+  "cost": 0.0605725,
+  "models": ["claude-haiku-5-5"],
+  "ignored": { "malformed": 0, "incomplete": 0 }
+}

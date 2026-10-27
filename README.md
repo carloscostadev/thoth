@@ -127,6 +127,35 @@ swift test
 THOTH_BENCH=1 swift test -c release -Xswiftc -enable-testing --filter ScanBenchmark
 ```
 
+### Log format fixtures
+
+Claude Code owns the transcript format and can change it.
+`Tests/ThothTests/Fixtures/LogFormat/` holds small synthetic transcripts, one
+per variation (malformed lines, missing and unknown fields, unknown record
+types and model ids, streamed repeats, subagents, compaction, cache usage,
+timestamps, a growing file). `LogFormatCompatibilityTests` reads each one
+whole, in chunks, while it grows and through the heavy scan, and checks that
+all of them give the expected calls, tokens and cost, and report the same
+ignored lines.
+
+When the format changes, add a fixture instead of editing an existing one:
+
+1. Write `<name>.jsonl` by hand: a few lines in the new shape, with made-up
+   ids, a cwd such as `/srv/fixture/app` and placeholder text. Never paste
+   lines from `~/.claude`: they hold paths, project names and conversations.
+2. Add `<name>.expected.json` next to it with the totals of the responses
+   that should count: `calls`, `tokens` (`input`, `output`, `cacheWrite`,
+   `cacheRead`), `cost` in USD worked out from the rates in `Pricing.swift`,
+   `models` (canonical ids), and `ignored` (`malformed`, `incomplete`).
+   Optional: `unpricedCalls`, `undatedCalls`, and `path` when the file lives
+   elsewhere in the project folder (e.g. `<session>/subagents/agent-x.jsonl`).
+3. Run `swift test --filter LogFormatCompatibility`. The new fixture is
+   picked up automatically; list its name in
+   `fixturesCoverEveryKnownVariation` so it can't be dropped by mistake.
+
+Costs are pinned to the rate card: when `Pricing.swift` changes, update the
+`cost` of the fixtures that use the changed models.
+
 ## Requirements
 
 - macOS 14.0+
