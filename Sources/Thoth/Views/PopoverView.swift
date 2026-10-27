@@ -20,7 +20,10 @@ struct PopoverView: View {
                 todayCost: service.formattedTodayCost,
                 todayTokens: service.todayTokens,
                 todayCalls: service.todayCalls,
-                dataStatus: service.dataStatus
+                dataStatus: service.dataStatus,
+                projects: service.availableProjects,
+                selectedProject: service.selectedGroup,
+                onSelectProject: { service.applyFilter($0) }
             )
             .padding(.horizontal, Theme.Spacing.lg)
             .padding(.top, Theme.Spacing.md)

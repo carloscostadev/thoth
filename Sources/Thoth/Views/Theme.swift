@@ -126,6 +126,8 @@ enum Theme {
         static let sectionLabel = SwiftUI.Font.system(size: 10, weight: .medium, design: .monospaced)
         static let tab = SwiftUI.Font.system(size: 12, weight: .medium)
         static let icon = SwiftUI.Font.system(size: 11, weight: .regular)
+        /// Disclosure chevron inside a chip.
+        static let chevron = SwiftUI.Font.system(size: 7, weight: .semibold)
     }
 
     /// Letter spacing for uppercase monospaced labels.
@@ -168,6 +170,8 @@ enum Theme {
         /// Visible height of the symbol in the popover header's lockup; the wordmark
         /// comes out about half as tall, large enough for its cut to read.
         static let headerMark: CGFloat = 20
+        /// Longest project name the header's filter chip shows before cutting it in the middle.
+        static let filterLabelMaxCharacters = 18
     }
 }
 

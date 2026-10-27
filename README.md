@@ -57,8 +57,16 @@ from `~/.claude/`.
   `cwd`, not just the encoded folder name; git worktrees, Horus parallel
   worktrees and Claude Code scratchpads count under their project), plus a
   weekday × hour heatmap of when you burn the most.
-- **Project filter (not in the UI yet).** The data layer can slice every
-  number by project group, but the picker isn't wired into the popover.
+- **Project filter.** A chip in the popover header ("All projects" by
+  default) opens a menu of the projects in your history, the same groups as
+  the Projects tab. Picking one filters every number: today's figures and
+  activity, the periods, models, trends, the ranking and the heatmap. The chip
+  stays visible on every tab and turns blue (accent dot and border) while a
+  project is selected, so filtered numbers aren't mistaken for the total. The
+  choice is remembered between launches; if that project no longer appears
+  in a complete read of the history, the filter goes back to "All projects".
+  A project without use in a period shows a real `$0.00`, with the usual
+  data status notice if a read failed.
 - **Menu bar mark.** Full while Claude Code is working, dimmed while it
   sleeps. No animation, so it costs nothing between state changes.
 - **Launch at login.** Optional, toggled from the popover.
@@ -77,7 +85,11 @@ A resumed or forked session can start a new transcript that repeats responses
 already logged in the one it came from. Each response is identified by its
 `message.id` and `requestId` (either one when the other is missing), and every
 scan (heavy, today, active-session poll) checks one shared registry of which
-transcript counts it, so a copy in another file is not counted again. If the
+transcript counts it, so a copy in another file is not counted again. A
+response counts in the transcript where it appears first by timestamp, ties
+going to the path that sorts first, so the project it lands in depends only on
+the files, never on the order they're read in: when a better copy turns up
+later, the transcript that had it is summed again without it. If the
 transcript that counted it disappears, the copy is counted instead. Responses
 without a usable timestamp (missing, or without a time zone) belong to no day:
 every scan leaves them out and reports them as ignored (incomplete) lines.
@@ -96,9 +108,11 @@ To stay cheap on a large history (the author's local tree is ~450 MB across
   being re-parsed, and a file that grew is read only from where the last scan
   stopped. Period buckets (week / 15d / month) are derived from a
   per-day breakdown at aggregation time, so the calendar can advance without
-  invalidating caches; a time zone change rebuilds them once. Switching the
-  project filter is aggregation-time too, so it doesn't re-read any files. On
-  a cold start, files are parsed in parallel.
+  invalidating caches; a time zone change rebuilds them once. On a cold
+  start, files are parsed in parallel.
+- **Project filter** applies when the per-file sums (heavy scan and today
+  summary) are added up, so switching projects reads no file: about a
+  millisecond on the benchmark's 600-file history.
 
 Files are read in 256 KB chunks and only lines carrying `usage` are
 JSON-decoded. All file I/O and parsing is driven from a dedicated background

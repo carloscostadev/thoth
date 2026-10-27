@@ -27,8 +27,10 @@ final class ClaudeDataService {
     var activeSessions: [SessionData] = []
     var modelUsage = ModelUsageAggregator()
     var burnRateTracker = BurnRateTracker()
-    var projectGroups: [ProjectGroup] = []
-    var selectedGroup: String? = nil // nil = All Projects
+    /// Groups the history's transcripts count under (the project ranking's names), for the picker.
+    var availableProjects: [String] = []
+    /// Project whose numbers are shown; nil = all projects. Set through `applyFilter`.
+    private(set) var selectedGroup: String? = nil
     var dateFilter: DateFilter = .allTime
     var totalCost: Double = 0
     var totalTokens: Int = 0
@@ -96,6 +98,8 @@ final class ClaudeDataService {
         /// Latest assistant response. Its tool_use blocks may still be on lines not written yet,
         /// so it is classified only once the next response starts (or provisionally when summed).
         var pending: (tools: [String], cost: Double, tokens: Int)?
+        /// Folder-name group, for a file the heavy scan hasn't read yet (see `groupKey(forFile:)`).
+        var heuristicGroup = ""
 
         mutating func commitPending() {
             guard let p = pending else { return }
@@ -153,12 +157,21 @@ final class ClaudeDataService {
     /// Zone the per-day buckets in `fullScanCaches` were computed in.
     @ObservationIgnored private var fullScanTimeZone: TimeZone?
 
+    /// Where the project filter is remembered between launches; nil keeps it in memory only.
+    @ObservationIgnored private let defaults: UserDefaults?
+    static let projectFilterKey = "projectFilter"
+
     init(claudeDir: String = NSHomeDirectory() + "/.claude",
          calendar: @escaping () -> Calendar = { .current },
-         now: @escaping () -> Date = Date.init) {
+         now: @escaping () -> Date = Date.init,
+         defaults: UserDefaults? = .standard) {
         self.claudeDir = claudeDir
         self.currentCalendar = calendar
         self.clock = now
+        self.defaults = defaults
+        let saved = defaults?.string(forKey: Self.projectFilterKey)
+        selectedGroup = saved
+        bgSelectedGroup = saved
     }
 
     /// Main thread. Safe to call more than once (the menu bar label's onAppear can fire again);
@@ -171,7 +184,6 @@ final class ClaudeDataService {
         analyticsQueue.async { [weak self] in
             guard let self else { return }
             self.loadSessions()
-            self.loadProjectGroups()
             self.unifiedFullScan()
         }
 
@@ -207,8 +219,8 @@ final class ClaudeDataService {
     }
 
     /// Incremental heavy scan. Per-file aggregates are cached keyed by path; files whose
-    /// (mtime, size) haven't changed are skipped without any I/O. The selectedGroup filter
-    /// is applied at aggregation time, so switching groups no longer invalidates caches.
+    /// (mtime, size) haven't changed are skipped without any I/O. The project filter is applied
+    /// at aggregation time (`publishAggregates`), so switching projects reads no file.
     /// First-run still reads everything once; subsequent runs read only what was appended to
     /// files that grew, and re-read whole only files that were replaced or shrank.
     /// Runs on analyticsQueue.
@@ -232,15 +244,7 @@ final class ClaudeDataService {
         // Folders or files the walk couldn't read, then transcripts that couldn't be opened.
         var failedItems = 0
         for dir in dirs {
-            // decodePath may probe the filesystem for ambiguous names; the answer is stable per name.
-            let heuristicGroupName: String
-            if let cached = heuristicGroups[dir] {
-                heuristicGroupName = cached
-            } else {
-                heuristicGroupName = ProjectGroup.groupName(from: ProjectGroup.decodePath(dir))
-                heuristicGroups[dir] = heuristicGroupName
-            }
-
+            let heuristicGroupName = heuristicGroup(forDir: dir)
             let dirPath = projectsDir + "/" + dir
             for file in listJSONLs(in: dirPath, failures: &failedItems) {
                 let filePath = file.path, mtime = file.mtime, size = file.size, fileNumber = file.fileNumber
@@ -281,43 +285,36 @@ final class ClaudeDataService {
             todayLastWalk = .distantPast
         }
 
-        // Re-parse them. Files are independent, so a cold start (every file) spreads over the
-        // available cores; results are merged back here, on analyticsQueue.
-        let pending = jobs
-        let responses = self.responses
-        // The first read since launch reports its progress (a cold start can take seconds).
+        // Prune entries for files that disappeared.
+        for key in gone {
+            fullScanCaches.removeValue(forKey: key)
+            pollCursors.removeValue(forKey: key)
+        }
+
+        // Transcripts that lost a response to a better copy (found by the today summary or the
+        // poll since the last scan) are read again without it.
+        requeue(responses.takeDispossessed(.fullScan), into: &jobs)
+
+        // Re-parse them. The first read since launch reports its progress (a cold start can take
+        // seconds).
         let progress: ScanProgress? = {
-            guard case .loading = bgStatus, !pending.isEmpty else { return nil }
-            return ScanProgress(total: pending.count) { [weak self] read, total in
+            guard case .loading = bgStatus, !jobs.isEmpty else { return nil }
+            return ScanProgress(total: jobs.count) { [weak self] read, total in
                 DispatchQueue.main.async {
                     guard let self, case .loading = self.dataStatus else { return }
                     self.dataStatus = .loading(filesRead: read, filesTotal: total)
                 }
             }
         }()
-        var results = [(cache: FullFileCache, cursor: UsageLogCursor)?](repeating: nil, count: pending.count)
-        results.withUnsafeMutableBufferPointer { buffer in
-            let slots = buffer // each iteration writes only its own index
-            DispatchQueue.concurrentPerform(iterations: pending.count) { i in
-                autoreleasepool {
-                    slots[i] = Self.buildFullFileCache(pending[i], calendar: cal, responses: responses)
-                }
-                progress?.fileDone()
-            }
-        }
-        for (job, result) in zip(pending, results) {
-            guard let result else {
-                failedItems += 1
-                continue
-            }
-            fullScanCaches[job.path] = result.cache
-            pollCursors[job.path] = result.cursor
-        }
-
-        // Prune entries for files that disappeared.
-        for key in gone {
-            fullScanCaches.removeValue(forKey: key)
-            pollCursors.removeValue(forKey: key)
+        failedItems += runFullScanJobs(jobs, calendar: cal, progress: progress)
+        // A transcript just read may have taken responses over from one read earlier, or from one
+        // read at the same time on another thread: read those again, without them. A transcript
+        // read from the start takes nothing over, so this settles in one round.
+        for _ in 0..<8 {
+            var again: [FullScanJob] = []
+            requeue(responses.takeDispossessed(.fullScan), into: &again)
+            if again.isEmpty { break }
+            failedItems += runFullScanJobs(again, calendar: cal, progress: nil)
         }
 
         // Worktrees and scratch folders join the project they belong to.
@@ -327,7 +324,70 @@ final class ClaudeDataService {
             cwdGroups = Dictionary(uniqueKeysWithValues: cwds.map { ($0, resolver.groupName(forCwd: $0)) })
         }
 
-        // Pass 2: aggregate from caches. Filter by selectedGroup at this stage.
+        let status = DataStatus.afterScan(totalFiles: seenFiles.count, failedItems: failedItems)
+        bgStatus = status
+        publishAggregates(scanStatus: status)
+    }
+
+    /// Runs on analyticsQueue. Queues a read from the start of each of `paths` the heavy scan
+    /// knows, without releasing the responses they count (their content didn't change).
+    private func requeue(_ paths: Set<String>, into jobs: inout [FullScanJob]) {
+        for path in paths {
+            if let i = jobs.firstIndex(where: { $0.path == path }) {
+                jobs[i].base = nil
+            } else if let cache = fullScanCaches[path] {
+                jobs.append(FullScanJob(path: path, mtime: cache.mtime, fileNumber: cache.fileNumber,
+                                        heuristicGroup: cache.heuristicGroup, base: nil))
+            }
+        }
+    }
+
+    /// Runs on analyticsQueue. Parses `jobs` into `fullScanCaches`; returns how many couldn't be
+    /// read. Files are independent, so a cold start (every file) spreads over the available
+    /// cores; results are merged back here.
+    private func runFullScanJobs(_ jobs: [FullScanJob], calendar cal: Calendar, progress: ScanProgress?) -> Int {
+        let responses = self.responses
+        var results = [(cache: FullFileCache, cursor: UsageLogCursor)?](repeating: nil, count: jobs.count)
+        results.withUnsafeMutableBufferPointer { buffer in
+            let slots = buffer // each iteration writes only its own index
+            DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
+                autoreleasepool {
+                    slots[i] = Self.buildFullFileCache(jobs[i], calendar: cal, responses: responses)
+                }
+                progress?.fileDone()
+            }
+        }
+        var failed = 0
+        for (job, result) in zip(jobs, results) {
+            guard let result else {
+                failed += 1
+                continue
+            }
+            fullScanCaches[job.path] = result.cache
+            pollCursors[job.path] = result.cursor
+        }
+        return failed
+    }
+
+    /// Runs on analyticsQueue. Pass 2 of the heavy scan, also run on its own when the project
+    /// filter changes: sums the per-file caches, keeping only the selected project's files, and
+    /// publishes the result (with `scanStatus`, when a scan just read the history). Reads no file.
+    /// A selected project the history no longer has falls back to all projects, once a complete
+    /// read confirms it is gone.
+    private func publishAggregates(scanStatus: DataStatus?) {
+        let cal = calendar
+        let now = clock()
+
+        let available = Set(fullScanCaches.values.map { groupKey(of: $0) })
+        var groupFilter = bgSelectedGroup
+        var dropped: String? = nil
+        if let group = groupFilter, bgStatus == .ready, !available.contains(group) {
+            dropped = group
+            groupFilter = nil
+            bgSelectedGroup = nil
+        }
+        let projects = available.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+
         // Each window counts today as its first day, so "7 Days" is today plus the 6 days before
         // (same convention as the 30-day window and chart).
         let today = cal.startOfDay(for: now)
@@ -353,10 +413,8 @@ final class ClaudeDataService {
         var projectCosts: [String: Double] = [:]
         var heat = Array(repeating: Array(repeating: 0.0, count: 24), count: 7)
 
-        let groupFilter = bgSelectedGroup
-
         for (_, cache) in fullScanCaches {
-            let groupKey = cache.cwd.flatMap { cwdGroups[$0] } ?? cache.heuristicGroup
+            let groupKey = groupKey(of: cache)
             if let group = groupFilter, groupKey != group { continue }
 
             totalC += cache.totalCost
@@ -419,13 +477,20 @@ final class ClaudeDataService {
             .map { (name: $0.key, cost: $0.value) }
             .sorted { $0.cost != $1.cost ? $0.cost > $1.cost : $0.name < $1.name }
         let heatMax = heat.flatMap { $0 }.max() ?? 0
-        let status = DataStatus.afterScan(totalFiles: seenFiles.count, failedItems: failedItems)
-        bgStatus = status
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.dataStatus = status
-            self.lastSuccessfulRead = now
+            if let scanStatus {
+                self.dataStatus = scanStatus
+                self.lastSuccessfulRead = now
+            }
+            self.availableProjects = projects
+            if let dropped, self.selectedGroup == dropped {
+                self.selectedGroup = nil
+                self.persistProjectFilter(nil)
+            }
+            // Another project picked meanwhile: its own aggregation is queued after this one.
+            guard self.selectedGroup == groupFilter else { return }
             self.modelUsage = aggregator
             self.totalCost = totalC
             self.totalTokens = totalT
@@ -443,6 +508,8 @@ final class ClaudeDataService {
             self.heatmap = heat
             self.heatmapMax = heatMax
         }
+        // Today's figures follow the fallback right away.
+        if dropped != nil { publishTodaySums(readAt: nil) }
     }
 
     /// Runs on analyticsQueue. Lists the projects folder, or publishes why it can't be read
@@ -495,22 +562,58 @@ final class ClaudeDataService {
     }
 
     /// Which transcript counts each response. Resumed and forked sessions copy responses of the
-    /// session they came from into their own file (same message id and request id); the first
-    /// transcript to claim a response counts it, and every scan (heavy, today, poll) asks here,
-    /// so a copy is never counted twice and all of them agree on where it counts.
+    /// session they came from into their own file (same message id and request id). Every scan
+    /// (heavy, today, poll) asks here, so a copy is never counted twice and all of them agree on
+    /// where it counts: in the transcript where the response appears first by timestamp, ties
+    /// going to the path that sorts first. The answer depends only on the files, never on the
+    /// order they are read in.
+    ///
+    /// When a better transcript turns up after another one already counted the response, it
+    /// takes the response over and the other one is reported as dispossessed, to each consumer
+    /// separately (`takeDispossessed`), so its per-file sums can be rebuilt without the response.
     /// Keys are `UsageRecord.responseKey`. Locked: the heavy scan claims from several threads.
     final class ResponseRegistry: @unchecked Sendable {
-        private let lock = NSLock()
-        private var owners: [Int: String] = [:]
+        enum Claim: Equatable {
+            /// `path` counts the response: it was unclaimed, or `path` already counts it.
+            case counts
+            /// `path` counts it instead of the transcript that did; that one is dispossessed.
+            case takesOver
+            /// Another transcript counts it.
+            case skips
 
-        /// True when `path` counts the response: it was unclaimed, or `path` already counts it.
-        func claim(_ key: Int?, for path: String) -> Bool {
-            guard let key else { return true }
+            var counts: Bool { self != .skips }
+        }
+
+        /// Scans that keep per-file sums and must rebuild those of dispossessed transcripts.
+        enum Consumer { case fullScan, today }
+
+        private struct Owner {
+            let path: String
+            let timestamp: Date
+
+            func yields(to path: String, at timestamp: Date) -> Bool {
+                timestamp != self.timestamp ? timestamp < self.timestamp : path < self.path
+            }
+        }
+
+        private let lock = NSLock()
+        private var owners: [Int: Owner] = [:]
+        private var dispossessed: [Consumer: Set<String>] = [:]
+
+        func claim(_ key: Int?, for path: String, at timestamp: Date) -> Claim {
+            guard let key else { return .counts }
             lock.lock()
             defer { lock.unlock() }
-            if let owner = owners[key] { return owner == path }
-            owners[key] = path
-            return true
+            guard let owner = owners[key] else {
+                owners[key] = Owner(path: path, timestamp: timestamp)
+                return .counts
+            }
+            if owner.path == path { return .counts }
+            guard owner.yields(to: path, at: timestamp) else { return .skips }
+            owners[key] = Owner(path: path, timestamp: timestamp)
+            dispossessed[.fullScan, default: []].insert(owner.path)
+            dispossessed[.today, default: []].insert(owner.path)
+            return .takesOver
         }
 
         /// Frees the responses counted by `paths`. Returns how many were freed.
@@ -518,14 +621,21 @@ final class ClaudeDataService {
             lock.lock()
             defer { lock.unlock() }
             let before = owners.count
-            owners = owners.filter { !paths.contains($0.value) }
+            owners = owners.filter { !paths.contains($0.value.path) }
             return before - owners.count
+        }
+
+        /// Transcripts that lost a response they counted since `consumer` last asked.
+        func takeDispossessed(_ consumer: Consumer) -> Set<String> {
+            lock.lock()
+            defer { lock.unlock() }
+            return dispossessed.removeValue(forKey: consumer) ?? []
         }
     }
 
     /// Parses a JSONL file into its time-independent aggregate, plus the read position the
     /// active-session poll should continue from: from the end of `job.base`, else from the start.
-    /// Responses another transcript already counts (`responses`) are left out. Depends only on
+    /// Responses another transcript counts (`responses`) are left out. Depends only on
     /// the file, `job` and the registry: safe to run concurrently. Returns nil if the file can't
     /// be read.
     private static func buildFullFileCache(_ job: FullScanJob, calendar cal: Calendar,
@@ -545,7 +655,7 @@ final class ClaudeDataService {
         let bytesRead = UsageLogParser.parseFile(atPath: job.path, cursor: &cursor, onCwd: onCwd) { record in
             guard record.isCounted else { return }
             // A correction follows its response: left out with it.
-            guard responses.claim(record.responseKey, for: job.path) else {
+            guard responses.claim(record.responseKey, for: job.path, at: record.timestamp).counts else {
                 if !record.isCorrection { cache.duplicatesSkipped += 1 }
                 return
             }
@@ -679,13 +789,33 @@ final class ClaudeDataService {
 
     // MARK: - Project Groups
 
-    /// Runs on analyticsQueue.
-    private func loadProjectGroups() {
-        let projectsDir = claudeDir + "/projects"
-        guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
-        let groups = ProjectGroup.groupDirectories(dirs)
-        DispatchQueue.main.async { [weak self] in
-            self?.projectGroups = groups
+    /// Runs on analyticsQueue. Folder-name group of a projects/<dir> folder. decodePath may probe
+    /// the filesystem for ambiguous names; the answer is stable per name, so it is cached.
+    private func heuristicGroup(forDir dir: String) -> String {
+        if let cached = heuristicGroups[dir] { return cached }
+        let name = ProjectGroup.groupName(from: ProjectGroup.decodePath(dir))
+        heuristicGroups[dir] = name
+        return name
+    }
+
+    /// Runs on analyticsQueue. Group a transcript counts under, the same in every scan and in the
+    /// ranking: its session's first cwd resolved against the whole history (worktrees and scratch
+    /// folders join their project), else the folder-name heuristic.
+    private func groupKey(of cache: FullFileCache) -> String {
+        cache.cwd.flatMap { cwdGroups[$0] } ?? cache.heuristicGroup
+    }
+
+    /// Runs on analyticsQueue. `groupKey(of:)` of a transcript the heavy scan has read, else
+    /// `fallback` (a file written since the last heavy scan).
+    private func groupKey(forFile path: String, fallback: @autoclosure () -> String) -> String {
+        fullScanCaches[path].map(groupKey(of:)) ?? fallback()
+    }
+
+    private func persistProjectFilter(_ group: String?) {
+        if let group {
+            defaults?.set(group, forKey: Self.projectFilterKey)
+        } else {
+            defaults?.removeObject(forKey: Self.projectFilterKey)
         }
     }
 
@@ -698,6 +828,7 @@ final class ClaudeDataService {
         var deltaUsages: [(usage: TokenUsage, cost: Double, model: String)] = []
         let sampleAt = Date()
         let filterStart = bgDateFilter.startDate
+        let groupFilter = bgSelectedGroup
 
         for session in bgActiveSessions {
             guard let dirPath = transcriptDir(for: session) else { continue }
@@ -707,12 +838,19 @@ final class ClaudeDataService {
             let main = dirPath + "/" + session.sessionId + ".jsonl"
             let paths = (FileManager.default.fileExists(atPath: main) ? [main] : [])
                 + listJSONLs(in: dirPath + "/" + session.sessionId).map(\.path)
+            let dirName = (dirPath as NSString).lastPathComponent
             for filePath in paths {
+                // Another project's session is still read (its responses are claimed here), but
+                // adds nothing to the figures on screen.
+                let shown = groupFilter.map { groupKey(forFile: filePath, fallback: heuristicGroup(forDir: dirName)) == $0 } ?? true
                 var cursor = pollCursors[filePath] ?? UsageLogCursor()
                 readAppendedLines(of: filePath, cursor: &cursor) { record in
                     guard record.isCounted else { return }
                     if let filterStart, record.timestamp < filterStart { return }
-                    guard responses.claim(record.responseKey, for: filePath) else { return }
+                    // A response taken over from another transcript is already in the totals,
+                    // under that one; the next heavy scan moves it.
+                    guard responses.claim(record.responseKey, for: filePath, at: record.timestamp) == .counts,
+                          shown else { return }
                     deltaUsages.append((record.usage, record.cost, record.model))
                 }
                 pollCursors[filePath] = cursor
@@ -722,7 +860,7 @@ final class ClaudeDataService {
         guard !deltaUsages.isEmpty else { return }
 
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.selectedGroup == groupFilter else { return }
             for (usage, cost, model) in deltaUsages {
                 self.modelUsage.add(usage: usage, cost: cost, model: model)
                 self.totalCost += cost
@@ -809,15 +947,21 @@ final class ClaudeDataService {
         let now = clock()
         let todayStart = cal.startOfDay(for: now)
 
-        // Day rolled over (or the group filter changed) → discard caches and walk again.
+        // Day rolled over → discard caches and walk again.
         if todayCacheDay != todayStart {
             todayFileCaches.removeAll()
             todayCacheDay = todayStart
             todayLastWalk = .distantPast
         }
+        // Transcripts that lost a response to a better copy since the last tick are summed again
+        // from the start, without it.
+        restartDispossessedTodayCaches()
 
-        // (path, mtime, size): from the walk's listing, or one stat per known file in between.
-        var candidates: [(path: String, mtime: Date, size: UInt64)] = []
+        // Every project's files are summed (the filter applies in `publishTodaySums`), so
+        // switching projects reads nothing again.
+        // (path, mtime, size, folder group): from the walk's listing, or one stat per known file
+        // in between.
+        var candidates: [(path: String, mtime: Date, size: UInt64, group: String)] = []
         // A known file that can no longer be stat-ed: this tick doesn't count as a full read.
         var statFailed = false
         if now.timeIntervalSince(todayLastWalk) >= Self.todayWalkInterval {
@@ -828,104 +972,139 @@ final class ClaudeDataService {
             case .noHistory, .inaccessible: unifiedFullScan()
             case .loading, .partial, .ready: break
             }
-            let groupFilter = bgSelectedGroup
             for dir in dirs {
-                if let group = groupFilter {
-                    let decoded = ProjectGroup.decodePath(dir)
-                    let dirGroup = ProjectGroup.groupName(from: decoded)
-                    if dirGroup != group { continue }
-                }
-                candidates += listJSONLs(in: projectsDir + "/" + dir).map { ($0.path, $0.mtime, $0.size) }
+                let group = heuristicGroup(forDir: dir)
+                candidates += listJSONLs(in: projectsDir + "/" + dir).map { ($0.path, $0.mtime, $0.size, group) }
             }
             todayLastWalk = now
         } else {
-            for path in todayFileCaches.keys {
+            for (path, cache) in todayFileCaches {
                 guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
                       let mtime = attrs[.modificationDate] as? Date else {
                     statFailed = true
                     continue
                 }
-                candidates.append((path, mtime, (attrs[.size] as? NSNumber)?.uint64Value ?? 0))
+                candidates.append((path, mtime, (attrs[.size] as? NSNumber)?.uint64Value ?? 0, cache.heuristicGroup))
             }
         }
 
         var seenFiles: Set<String> = []
 
-        for (filePath, mtime, currentSize) in candidates {
-
+        for candidate in candidates {
             // Not modified today → cannot contain today's entries.
-            if mtime < todayStart { continue }
+            if candidate.mtime < todayStart { continue }
 
-            seenFiles.insert(filePath)
-            var cache = todayFileCaches[filePath] ?? TodayFileCache()
-
-            // mtime unchanged since last read → nothing new in this file.
-            if cache.mtime == mtime { continue }
-
-            // File shrunk (rotated/truncated) → discard cache and start over.
-            if currentSize < cache.cursor.offset {
-                cache = TodayFileCache()
-            }
-
-            var cursor = cache.cursor
-            autoreleasepool {
-                readAppendedLines(of: filePath, cursor: &cursor, onContinuation: { tools in
-                    cache.pending?.tools.append(contentsOf: tools)
-                }) { record in
-                    if record.isCorrection {
-                        // More output for the response just read: it is still `pending` (or
-                        // already summed, when it was not an assistant line).
-                        guard record.isCounted, record.timestamp >= todayStart,
-                              responses.claim(record.responseKey, for: filePath) else { return }
-                        cache.cost += record.cost
-                        cache.tokens += record.usage.totalTokens
-                        cache.pending?.cost += record.cost
-                        cache.pending?.tokens += record.usage.totalTokens
-                        return
-                    }
-                    cache.commitPending()
-                    guard record.isCounted else { return }
-                    // Skip entries from before today (file may straddle midnight on first scan).
-                    if record.timestamp < todayStart { return }
-                    // A copy of a response another transcript counts.
-                    guard responses.claim(record.responseKey, for: filePath) else { return }
-
-                    let lineCost = record.cost
-                    let tokens = record.usage.totalTokens
-                    cache.cost += lineCost
-                    cache.tokens += tokens
-                    cache.calls += 1
-                    if record.isAssistant {
-                        cache.pending = (record.toolNames, lineCost, tokens)
-                    }
-                }
-            }
-            cache.cursor = cursor
-            cache.mtime = mtime
-            todayFileCaches[filePath] = cache
+            seenFiles.insert(candidate.path)
+            readTodayFile(candidate.path, mtime: candidate.mtime, size: candidate.size,
+                          group: candidate.group, todayStart: todayStart)
         }
 
-        // Drop entries for files that disappeared (deleted/moved/group-filtered out).
+        // A file read this tick may have taken responses over from one read earlier: sum that
+        // one again now, so this tick doesn't count them twice.
+        for path in restartDispossessedTodayCaches() where seenFiles.contains(path) {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                  let mtime = attrs[.modificationDate] as? Date else {
+                statFailed = true
+                continue
+            }
+            readTodayFile(path, mtime: mtime, size: (attrs[.size] as? NSNumber)?.uint64Value ?? 0,
+                          group: todayFileCaches[path]?.heuristicGroup ?? "", todayStart: todayStart)
+        }
+
+        // Drop entries for files that disappeared (deleted/moved).
         for key in Array(todayFileCaches.keys) where !seenFiles.contains(key) {
             todayFileCaches.removeValue(forKey: key)
         }
 
+        // Only a read of history already known to be readable refreshes "Updated …".
+        publishTodaySums(readAt: bgStatus.showsFigures && !statFailed ? now : nil)
+    }
+
+    /// Runs on analyticsQueue. Reads what was appended to `path` since its today cache last read
+    /// it, adding today's responses (the whole file again when it shrank).
+    private func readTodayFile(_ path: String, mtime: Date, size currentSize: UInt64, group: String, todayStart: Date) {
+        var cache = todayFileCaches[path] ?? TodayFileCache(heuristicGroup: group)
+
+        // mtime unchanged since last read → nothing new in this file.
+        if cache.mtime == mtime { return }
+
+        // File shrunk (rotated/truncated) → discard cache and start over.
+        if currentSize < cache.cursor.offset {
+            cache = TodayFileCache(heuristicGroup: group)
+        }
+
+        var cursor = cache.cursor
+        autoreleasepool {
+            readAppendedLines(of: path, cursor: &cursor, onContinuation: { tools in
+                cache.pending?.tools.append(contentsOf: tools)
+            }) { record in
+                if record.isCorrection {
+                    // More output for the response just read: it is still `pending` (or
+                    // already summed, when it was not an assistant line).
+                    guard record.isCounted, record.timestamp >= todayStart,
+                          responses.claim(record.responseKey, for: path, at: record.timestamp).counts else { return }
+                    cache.cost += record.cost
+                    cache.tokens += record.usage.totalTokens
+                    cache.pending?.cost += record.cost
+                    cache.pending?.tokens += record.usage.totalTokens
+                    return
+                }
+                cache.commitPending()
+                guard record.isCounted else { return }
+                // Skip entries from before today (file may straddle midnight on first scan).
+                if record.timestamp < todayStart { return }
+                // A copy of a response another transcript counts.
+                guard responses.claim(record.responseKey, for: path, at: record.timestamp).counts else { return }
+
+                let lineCost = record.cost
+                let tokens = record.usage.totalTokens
+                cache.cost += lineCost
+                cache.tokens += tokens
+                cache.calls += 1
+                if record.isAssistant {
+                    cache.pending = (record.toolNames, lineCost, tokens)
+                }
+            }
+        }
+        cache.cursor = cursor
+        cache.mtime = mtime
+        todayFileCaches[path] = cache
+    }
+
+    /// Runs on analyticsQueue. Empties the today caches of transcripts that lost a response to a
+    /// better copy, so they are read again without it. Returns their paths.
+    @discardableResult
+    private func restartDispossessedTodayCaches() -> [String] {
+        var restarted: [String] = []
+        for path in responses.takeDispossessed(.today) {
+            guard let cache = todayFileCaches[path] else { continue }
+            todayFileCaches[path] = TodayFileCache(heuristicGroup: cache.heuristicGroup)
+            restarted.append(path)
+        }
+        return restarted
+    }
+
+    /// Runs on analyticsQueue. Sums today's per-file caches, keeping only the selected project's
+    /// files, and publishes the result. Reads no file.
+    private func publishTodaySums(readAt: Date?) {
+        let groupFilter = bgSelectedGroup
         var sumCost = 0.0
         var sumTokens = 0
         var sumCalls = 0
         var sumActivity = ActivityAggregator()
-        for (_, c) in todayFileCaches {
+        for (path, c) in todayFileCaches {
+            if let group = groupFilter, groupKey(forFile: path, fallback: c.heuristicGroup) != group { continue }
             sumCost += c.cost
             sumTokens += c.tokens
             sumCalls += c.calls
             sumActivity.merge(c.activityIncludingPending)
         }
-        // Only a read of history already known to be readable refreshes "Updated …".
-        let readAt: Date? = bgStatus.showsFigures && !statFailed ? now : nil
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if let readAt { self.lastSuccessfulRead = readAt }
+            // Another project picked meanwhile: its own sums are queued after these.
+            guard self.selectedGroup == groupFilter else { return }
             self.todayCost = sumCost
             self.todayTokens = sumTokens
             self.todayCalls = sumCalls
@@ -933,18 +1112,28 @@ final class ClaudeDataService {
         }
     }
 
+    /// Main thread. Shows only `group`'s numbers (nil: every project) and remembers the choice
+    /// for the next launch. The per-file sums are added up again for the new project; no
+    /// transcript is read again.
     func applyFilter(_ group: String?) {
+        guard group != selectedGroup else { return }
         selectedGroup = group
+        persistProjectFilter(group)
+        // The burn rate only counts samples of the project shown.
         burnRateTracker = BurnRateTracker()
         analyticsQueue.async { [weak self] in
             guard let self else { return }
             self.bgSelectedGroup = group
-            // Heavy-scan caches are aggregation-time filterable, so they survive group changes.
-            // Today's caches filter at directory level — drop them so the next tick rebuilds for the new group.
-            self.todayFileCaches.removeAll()
-            self.todayCacheDay = nil
-            self.unifiedFullScan()
+            // Before the first read there is nothing to add up; that read uses the new filter.
+            guard self.bgStatus.showsFigures else { return }
+            self.publishAggregates(scanStatus: nil)
+            self.publishTodaySums(readAt: nil)
         }
+    }
+
+    /// Blocks until the work already queued on the background queue has run. For tests.
+    func waitForBackgroundWork() {
+        analyticsQueue.sync {}
     }
 
     func applyDateFilter(_ filter: DateFilter) {

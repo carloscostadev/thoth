@@ -45,7 +45,7 @@ struct ScanBenchmark {
                      history.files.count, Double(history.bytesWritten) / 1_048_576, history.requests.count))
         print(String(format: "BENCH maxrss before scans: %.0f MB", Self.maxRSSMB()))
 
-        let service = ClaudeDataService(claudeDir: history.root.path)
+        let service = ClaudeDataService(claudeDir: history.root.path, defaults: nil)
         service.loadSessions()
 
         _ = Self.measure("full scan (cold)") { service.unifiedFullScan() }
@@ -59,5 +59,14 @@ struct ScanBenchmark {
         _ = Self.measure("active-session poll (append)") { service.pollActiveSessions() }
         _ = Self.measure("today summary (append)") { service.computeTodaySummaries() }
         _ = Self.measure("full scan (10 files grew)") { service.unifiedFullScan() }
+        // Re-adds the per-file sums for one project, then for all: no file is read.
+        _ = Self.measure("project filter switch") {
+            service.applyFilter("Group1")
+            service.waitForBackgroundWork()
+        }
+        _ = Self.measure("project filter back to all") {
+            service.applyFilter(nil)
+            service.waitForBackgroundWork()
+        }
     }
 }

@@ -8,13 +8,17 @@ struct StatusHeaderView: View {
     let todayTokens: Int
     let todayCalls: Int
     var dataStatus: DataStatus = .ready
+    var projects: [String] = []
+    var selectedProject: String? = nil
+    var onSelectProject: (String?) -> Void = { _ in }
 
     var body: some View {
         VStack(spacing: Theme.Spacing.md) {
             HStack(spacing: Theme.Spacing.sm) {
                 ThothLockup(height: Theme.Size.headerMark)
                     .foregroundStyle(Theme.Palette.textPrimary)
-                Spacer()
+                Spacer(minLength: Theme.Spacing.sm)
+                ProjectFilterView(projects: projects, selected: selectedProject, onSelect: onSelectProject)
                 ThemeChip(
                     text: isConnected ? "Connected" : "No Sessions",
                     dot: Theme.connectionColor(isConnected)
