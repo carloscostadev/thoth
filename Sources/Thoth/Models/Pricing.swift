@@ -152,13 +152,34 @@ struct ModelPricing {
     /// not newer than the requested one (e.g. a future `opus-5-6` uses Opus 5.5 rates), or the
     /// oldest known version for ids older than the table. Ids without a known family return nil.
     static func forModel(_ modelId: String) -> ModelPricing? {
-        guard let id = ModelIdentifier.parse(modelId), let family = byFamily[id.family] else { return nil }
-        return family.first { $0.versionKey <= id.versionKey } ?? family.last
+        match(for: modelId)?.pricing
     }
+
+    /// The rate card `forModel` uses, and whether it is the model's own or a reference taken
+    /// from another version of the family.
+    static func match(for modelId: String) -> PricingMatch? {
+        guard let id = ModelIdentifier.parse(modelId), let family = byFamily[id.family],
+              let pricing = family.first(where: { $0.versionKey <= id.versionKey }) ?? family.last else { return nil }
+        return PricingMatch(pricing: pricing, isExact: pricing.versionKey == id.versionKey)
+    }
+
+    /// Canonical id of this rate card's version: `claude-opus-5-5`.
+    var canonicalId: String { ModelIdentifier(family: family, major: major, minor: minor).canonical }
 
     /// Newest version first.
     private static let byFamily: [ModelFamily: [ModelPricing]] =
         Dictionary(grouping: all, by: \.family).mapValues { $0.sorted { $0.versionKey > $1.versionKey } }
 
     private var versionKey: Int { major * 100 + minor }
+}
+
+/// Which rate card prices a model id.
+struct PricingMatch {
+    let pricing: ModelPricing
+    /// False when the table has no rates for the id's version and those of another version of
+    /// the same family are used: the cost is an approximation.
+    let isExact: Bool
+
+    /// Id of the version whose rates are used, without the `claude-` prefix: `opus-5-5`.
+    var referenceName: String { String(pricing.canonicalId.dropFirst("claude-".count)) }
 }

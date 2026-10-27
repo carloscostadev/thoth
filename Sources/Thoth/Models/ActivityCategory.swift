@@ -31,27 +31,43 @@ enum ActivityCategory: String, CaseIterable, Identifiable {
         // Priority-based classification
         let toolSet = Set(tools)
 
-        // Coding: Edit, Write, NotebookEdit
-        let codingTools: Set<String> = ["Edit", "Write", "NotebookEdit"]
         if !toolSet.isDisjoint(with: codingTools) { return .coding }
 
         // Design: MCP figma tools, frontend-design skill
-        if tools.contains(where: { $0.contains("figma") || $0.contains("design") }) { return .design }
+        if tools.contains(where: { name in designKeywords.contains { name.contains($0) } }) { return .design }
 
-        // Terminal: Bash
-        if toolSet.contains("Bash") { return .terminal }
-
-        // Planning: EnterPlanMode, ExitPlanMode, TaskCreate, TaskUpdate, TaskList, Task, TodoWrite
-        let planningTools: Set<String> = ["EnterPlanMode", "ExitPlanMode", "TaskCreate", "TaskUpdate", "TaskList", "TaskOutput", "Task", "TodoWrite"]
+        if !toolSet.isDisjoint(with: terminalTools) { return .terminal }
         if !toolSet.isDisjoint(with: planningTools) { return .planning }
-
-        // Exploration: Read, Grep, Glob, Agent, WebSearch, WebFetch
-        let explorationTools: Set<String> = ["Read", "Grep", "Glob", "Agent", "WebSearch", "WebFetch", "ToolSearch"]
         if !toolSet.isDisjoint(with: explorationTools) { return .exploration }
 
         // Default: anything else (Skill, AskUserQuestion, etc.)
         return .conversation
     }
+
+    static let codingTools: Set<String> = ["Edit", "Write", "NotebookEdit"]
+    static let designKeywords = ["figma", "design"]
+    static let terminalTools: Set<String> = ["Bash"]
+    static let planningTools: Set<String> = ["EnterPlanMode", "ExitPlanMode", "TaskCreate", "TaskUpdate", "TaskList", "TaskOutput", "Task", "TodoWrite"]
+    static let explorationTools: Set<String> = ["Read", "Grep", "Glob", "Agent", "WebSearch", "WebFetch", "ToolSearch"]
+
+    /// Categories in the order `classify` checks them: a turn takes the first one that matches.
+    static let classificationOrder: [ActivityCategory] = [.coding, .design, .terminal, .planning, .exploration, .conversation]
+
+    /// What puts a turn in this category, for the in-app explanation.
+    var rule: String {
+        func list(_ tools: Set<String>) -> String { tools.sorted().joined(separator: ", ") }
+        switch self {
+        case .coding: return "Edits files: \(list(Self.codingTools))."
+        case .design: return "Uses a tool whose name contains \(Self.designKeywords.map { "\"\($0)\"" }.joined(separator: " or "))."
+        case .terminal: return "Runs shell commands: \(list(Self.terminalTools))."
+        case .planning: return "Plans or tracks tasks: \(list(Self.planningTools))."
+        case .exploration: return "Reads, searches or delegates: \(list(Self.explorationTools))."
+        case .conversation: return "No tools, or only tools not listed above."
+        }
+    }
+
+    /// Short explanation of how activity is inferred, shown next to the activity section.
+    static let explanation = "Each assistant turn is put in one category from the tools it called, checked in this order; the first match wins. It's an inference from tool calls, not a measure of time spent or of intent. Costs are API-equivalent estimates."
 }
 
 struct ActivityEntry: Identifiable {

@@ -90,6 +90,64 @@ func officialRatesPerModel(id: String) throws {
     #expect(ModelPricing.forModel("claude-3-haiku-20240307")?.rates == ModelPricing.forModel("claude-3-5-haiku")?.rates)
 }
 
+@Test(arguments: officialRates.map(\.id))
+func listedVersionsAreExactMatches(id: String) throws {
+    let match = try #require(ModelPricing.match(for: id))
+    #expect(match.isExact)
+    #expect(ModelUsageEntry(modelId: ModelUsageEntry.key(for: id)).pricingNote == nil)
+}
+
+@Test func decoratedIdsOfListedVersionsAreExact() {
+    for id in ["us.anthropic.claude-sonnet-4-6-v1:0", "claude-opus-4-1@20250805", "claude-opus-4-6[1m]",
+               "claude-sonnet-4-5-20250929", "claude-sonnet-5-5-latest"] {
+        #expect(ModelPricing.match(for: id)?.isExact == true, "\(id)")
+    }
+}
+
+@Test func fallbackPricesAreFlaggedWithTheirReference() {
+    let cases: [(id: String, reference: String)] = [
+        ("claude-opus-5-6", "opus-5-5"),
+        ("claude-opus-6-20270101", "opus-5-5"),
+        ("claude-sonnet-6", "sonnet-5-5"),
+        ("claude-fable-5-2", "fable-5-1"),
+        ("claude-opus-4-9", "opus-4-8"),
+        ("claude-opus-4-2", "opus-4-1"),
+        ("claude-3-opus-20240229", "opus-4"),
+        ("claude-3-5-sonnet-20241022", "sonnet-4"),
+        ("claude-3-haiku-20240307", "haiku-3-5"),
+    ]
+    for (id, reference) in cases {
+        let match = ModelPricing.match(for: id)
+        #expect(match?.isExact == false, "\(id)")
+        #expect(match?.referenceName == reference, "\(id)")
+    }
+    #expect(ModelPricing.match(for: "<synthetic>") == nil)
+}
+
+@Test func matchUsesTheSameRatesAsForModel() {
+    let ids = officialRates.map(\.id) + ["claude-opus-5-6", "claude-3-opus-20240229", "claude-haiku-6", "claude-mythos-6"]
+    for id in ids {
+        #expect(ModelPricing.match(for: id)?.pricing.rates == ModelPricing.forModel(id)?.rates, "\(id)")
+    }
+    // Costs are unchanged by the flag: a fallback model costs exactly what its reference costs.
+    let usage = TokenUsage(inputTokens: 12_345, outputTokens: 6_789, cacheWriteTokens: 1_000, cacheReadTokens: 50_000)
+    #expect(usage.cost(for: "claude-opus-5-6") == usage.cost(for: "claude-opus-5-5"))
+}
+
+@Test func modelRowsExposeTheApproximatePrice() {
+    var aggregator = ModelUsageAggregator()
+    let usage = TokenUsage(inputTokens: 100, outputTokens: 100, cacheWriteTokens: 0, cacheReadTokens: 0)
+    aggregator.add(usage: usage, model: "claude-opus-5-6-20270101")
+    aggregator.add(usage: usage, model: "claude-sonnet-5-5")
+    let rows = Dictionary(uniqueKeysWithValues: aggregator.entries.map { ($0.modelId, $0) })
+
+    let future = rows["claude-opus-5-6"]
+    #expect(future?.hasApproximatePricing == true)
+    #expect(future?.pricingNote?.contains("opus-5-5 rates") == true)
+    #expect(rows["claude-sonnet-5-5"]?.hasApproximatePricing == false)
+    #expect(rows["claude-sonnet-5-5"]?.pricingNote == nil)
+}
+
 @Test func unknownModelsReturnNil() {
     for id in ["unknown-model", "<synthetic>", "claude-instant-1.2", "claude-2.1", "gpt-4o", "", "claude-", "claude-opus"] {
         #expect(ModelPricing.forModel(id) == nil, "\(id)")

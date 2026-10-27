@@ -29,6 +29,8 @@ enum Theme {
         static let accent   = Color(light: 0x2F6FEB, dark: 0x6B9BFF)
         static let positive = Color(light: 0x2F8A57, dark: 0x7CC49A)
         static let negative = Color(light: 0xB0533F, dark: 0xD99484)
+        /// Incomplete or approximate data (partial read, estimated price).
+        static let caution  = Color(light: 0x94701F, dark: 0xD6B670)
 
         /// Semantic aliases: money and tokens stay monochrome.
         static let cost   = textPrimary
@@ -74,6 +76,17 @@ enum Theme {
         case .idle: return Palette.textSecondary
         case .active: return Palette.positive
         case .sprint: return Palette.negative
+        }
+    }
+
+    /// Accent of the data status: nil while everything was read.
+    static func color(for status: DataStatus) -> Color? {
+        switch status {
+        case .ready: return nil
+        case .loading: return Palette.accent
+        case .noHistory: return Palette.textTertiary
+        case .partial: return Palette.caution
+        case .inaccessible: return Palette.negative
         }
     }
 
@@ -255,6 +268,30 @@ struct ThemeChip: View {
         .padding(.vertical, Theme.Spacing.xs)
         .background(Capsule().fill(Theme.Palette.background))
         .overlay(Capsule().strokeBorder(Theme.Palette.border, lineWidth: Theme.Size.hairline))
+    }
+}
+
+/// Small "i" button: a tooltip on hover and `content` in a popover on click.
+struct InfoButton<Content: View>: View {
+    @Binding var isPresented: Bool
+    let label: String
+    let help: String
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            Image(systemName: "info.circle")
+                .font(Theme.Font.icon)
+                .foregroundStyle(Theme.Palette.textTertiary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(label)
+        .accessibilityHint(help)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom, content: content)
     }
 }
 

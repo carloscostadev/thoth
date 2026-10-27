@@ -19,7 +19,8 @@ struct PopoverView: View {
                 isConnected: service.isConnected,
                 todayCost: service.formattedTodayCost,
                 todayTokens: service.todayTokens,
-                todayCalls: service.todayCalls
+                todayCalls: service.todayCalls,
+                dataStatus: service.dataStatus
             )
             .padding(.horizontal, Theme.Spacing.lg)
             .padding(.top, Theme.Spacing.md)
@@ -31,13 +32,19 @@ struct PopoverView: View {
 
             ScrollView {
                 VStack(spacing: Theme.Spacing.sm) {
-                    switch selectedTab {
-                    case .overview:
-                        OverviewTabView(service: service)
-                    case .trends:
-                        TrendsTabView(service: service)
-                    case .projects:
-                        ProjectsTabView(service: service)
+                    // Without a read there are no figures: the lists would only hold zeros that
+                    // look real, so none of them is shown.
+                    if let message = service.dataStatus.unavailableMessage {
+                        DataUnavailableView(message: message)
+                    } else {
+                        switch selectedTab {
+                        case .overview:
+                            OverviewTabView(service: service)
+                        case .trends:
+                            TrendsTabView(service: service)
+                        case .projects:
+                            ProjectsTabView(service: service)
+                        }
                     }
                 }
                 .padding(.horizontal, Theme.Spacing.lg)
@@ -47,7 +54,7 @@ struct PopoverView: View {
 
             ThemeDivider()
 
-            FooterView()
+            FooterView(lastRead: service.lastSuccessfulRead)
                 .padding(.horizontal, Theme.Spacing.lg)
                 .padding(.vertical, Theme.Spacing.sm)
         }
@@ -91,6 +98,8 @@ struct TabBarView: View {
 }
 
 struct FooterView: View {
+    let lastRead: Date?
+
     var body: some View {
         HStack {
             Toggle("Launch at login", isOn: Binding(
@@ -101,6 +110,13 @@ struct FooterView: View {
             .font(Theme.Font.caption)
             .foregroundStyle(Theme.Palette.textSecondary)
             Spacer()
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                Text(DataStatus.updatedText(lastRead: lastRead, now: context.date))
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+            }
+            .help(lastRead.map { "Last successful read of ~/.claude/projects: \($0.formatted(date: .abbreviated, time: .standard))" }
+                  ?? "~/.claude/projects hasn't been read yet")
             Button {
                 NSApplication.shared.terminate(nil)
             } label: {
@@ -108,6 +124,26 @@ struct FooterView: View {
             }
             .buttonStyle(.plain)
         }
+    }
+}
+
+/// Stands in for every tab while the history hasn't been read.
+struct DataUnavailableView: View {
+    let message: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            SectionHeader("No figures")
+            Text(DataStatus.placeholder)
+                .font(Theme.Font.metric)
+                .foregroundStyle(Theme.Palette.textTertiary)
+            Text(message)
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .themeCard()
+        .accessibilityElement(children: .combine)
     }
 }
 

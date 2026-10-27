@@ -7,9 +7,17 @@ struct ActivitySectionView: View {
         entries.map(\.cost).max() ?? 1
     }
 
+    @State private var showsExplanation = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            SectionHeader("Activity · Today")
+            SectionHeader(title: "Activity · Today") {
+                InfoButton(isPresented: $showsExplanation,
+                           label: "How activity categories are inferred",
+                           help: ActivityCategory.explanation) {
+                    ActivityExplanationView()
+                }
+            }
 
             ForEach(entries) { entry in
                 activityRow(entry)
@@ -46,5 +54,40 @@ struct ActivitySectionView: View {
                 .frame(minWidth: 58, alignment: .trailing)
         }
         .frame(height: 20)
+    }
+}
+
+/// Popover content: how turns are classified, category by category.
+struct ActivityExplanationView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            ThemeLabel("How activity is inferred")
+            Text(ActivityCategory.explanation)
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                ForEach(ActivityCategory.classificationOrder) { category in
+                    HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
+                        Circle()
+                            .fill(Theme.color(for: category))
+                            .frame(width: Theme.Size.dot, height: Theme.Size.dot)
+                        Text(category.rawValue)
+                            .font(Theme.Font.bodyEmphasis)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                            .frame(width: 92, alignment: .leading)
+                        Text(category.rule)
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+        }
+        .padding(Theme.Spacing.lg)
+        .frame(width: 340, alignment: .leading)
+        .background(Theme.Palette.background)
     }
 }

@@ -12,6 +12,13 @@ struct ModelsTabView: View {
             ForEach(entries.sorted(by: { $0.totalCost > $1.totalCost })) { entry in
                 modelRow(entry)
             }
+            if entries.contains(where: \.hasApproximatePricing) {
+                Text("≈ Approximate: priced at the rates of the closest known version of the family.")
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -27,6 +34,13 @@ struct ModelsTabView: View {
                 Text(entry.displayName)
                     .font(Theme.Font.bodyEmphasis)
                     .foregroundStyle(Theme.Palette.textPrimary)
+                if let note = entry.pricingNote {
+                    Text("≈")
+                        .font(Theme.Font.bodyEmphasis)
+                        .foregroundStyle(Theme.Palette.caution)
+                        .help(note)
+                        .accessibilityLabel(note)
+                }
                 Spacer()
                 Text(String(format: "%.0f%%", percentage))
                     .font(Theme.Font.captionNumber)
@@ -38,10 +52,17 @@ struct ModelsTabView: View {
 
             ThemeBar(fraction: percentage / 100, color: color)
 
-            Text("\(formatTokens(entry.totalTokens)) tokens · \(entry.sessionCount) sessions")
+            Text(detail(entry))
                 .font(Theme.Font.captionNumber)
                 .foregroundStyle(Theme.Palette.textTertiary)
+                .help(entry.pricingNote ?? "")
         }
+    }
+
+    private func detail(_ entry: ModelUsageEntry) -> String {
+        let base = "\(formatTokens(entry.totalTokens)) tokens · \(entry.sessionCount) sessions"
+        guard let match = entry.pricingMatch, !match.isExact else { return base }
+        return base + " · ≈ \(match.referenceName) rates"
     }
 
     private func formatTokens(_ count: Int) -> String {

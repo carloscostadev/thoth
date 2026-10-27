@@ -99,6 +99,18 @@ struct ModelUsageEntry: Identifiable {
 
     var family: ModelFamily? { ModelIdentifier.parse(modelId)?.family }
 
+    /// Rate card used for this row. Version decorations dropped by the row key don't affect it.
+    var pricingMatch: PricingMatch? { ModelPricing.match(for: modelId) }
+
+    /// True when the cost uses another version's rates (no exact price for this version).
+    var hasApproximatePricing: Bool { pricingMatch.map { !$0.isExact } ?? false }
+
+    /// Tooltip for an approximate price, nil when the price is the model's own.
+    var pricingNote: String? {
+        guard let match = pricingMatch, !match.isExact else { return nil }
+        return "No list price for \(displayName) yet: costed at \(match.referenceName) rates, the closest known version of the family. Approximate."
+    }
+
     var displayName: String {
         if modelId.hasPrefix("claude-") {
             return String(modelId.dropFirst("claude-".count))

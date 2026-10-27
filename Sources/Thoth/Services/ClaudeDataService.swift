@@ -50,6 +50,11 @@ final class ClaudeDataService {
     var monthTokens: Int = 0
     var allTimeTokens: Int = 0
 
+    /// Whether the figures come from a complete read, a partial one, or none yet.
+    var dataStatus: DataStatus = .initial
+    /// Last time a scan read the history (fully or partially).
+    var lastSuccessfulRead: Date? = nil
+
     // Analytics
     var dailyCostSeries: [(date: Date, cost: Double, tokens: Int)] = [] // last 30 days, oldest first
     var projectedMonthCost: Double = 0
@@ -76,6 +81,8 @@ final class ClaudeDataService {
     @ObservationIgnored private var heuristicGroups: [String: String] = [:] // projects/<dir> name -> group
     /// Session cwd -> ranking group, rebuilt whenever a new cwd shows up (see `ProjectGroup.Resolver`).
     @ObservationIgnored private var cwdGroups: [String: String] = [:]
+    /// Background copy of `dataStatus`.
+    @ObservationIgnored private var bgStatus: DataStatus = .initial
 
     private struct TodayFileCache {
         var mtime: Date = .distantPast
@@ -202,7 +209,7 @@ final class ClaudeDataService {
     /// Runs on analyticsQueue.
     func unifiedFullScan() {
         let projectsDir = claudeDir + "/projects"
-        guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
+        guard let dirs = listProjectsDir(projectsDir) else { return }
 
         let cal = calendar
         let now = clock()
@@ -217,6 +224,8 @@ final class ClaudeDataService {
         // Pass 1: find files that changed since their cached aggregate.
         var seenFiles: Set<String> = []
         var jobs: [FullScanJob] = []
+        // Folders or files the walk couldn't read, then transcripts that couldn't be opened.
+        var failedItems = 0
         for dir in dirs {
             // decodePath may probe the filesystem for ambiguous names; the answer is stable per name.
             let heuristicGroupName: String
@@ -228,7 +237,7 @@ final class ClaudeDataService {
             }
 
             let dirPath = projectsDir + "/" + dir
-            for file in listJSONLs(in: dirPath) {
+            for file in listJSONLs(in: dirPath, failures: &failedItems) {
                 let filePath = file.path, mtime = file.mtime, size = file.size, fileNumber = file.fileNumber
                 seenFiles.insert(filePath)
 
@@ -247,6 +256,16 @@ final class ClaudeDataService {
         // Re-parse them. Files are independent, so a cold start (every file) spreads over the
         // available cores; results are merged back here, on analyticsQueue.
         let pending = jobs
+        // The first read since launch reports its progress (a cold start can take seconds).
+        let progress: ScanProgress? = {
+            guard case .loading = bgStatus, !pending.isEmpty else { return nil }
+            return ScanProgress(total: pending.count) { [weak self] read, total in
+                DispatchQueue.main.async {
+                    guard let self, case .loading = self.dataStatus else { return }
+                    self.dataStatus = .loading(filesRead: read, filesTotal: total)
+                }
+            }
+        }()
         var results = [(cache: FullFileCache, cursor: UsageLogCursor)?](repeating: nil, count: pending.count)
         results.withUnsafeMutableBufferPointer { buffer in
             let slots = buffer // each iteration writes only its own index
@@ -254,10 +273,14 @@ final class ClaudeDataService {
                 autoreleasepool {
                     slots[i] = Self.buildFullFileCache(pending[i], calendar: cal)
                 }
+                progress?.fileDone()
             }
         }
         for (job, result) in zip(pending, results) {
-            guard let result else { continue }
+            guard let result else {
+                failedItems += 1
+                continue
+            }
             fullScanCaches[job.path] = result.cache
             pollCursors[job.path] = result.cursor
         }
@@ -367,9 +390,13 @@ final class ClaudeDataService {
             .map { (name: $0.key, cost: $0.value) }
             .sorted { $0.cost != $1.cost ? $0.cost > $1.cost : $0.name < $1.name }
         let heatMax = heat.flatMap { $0 }.max() ?? 0
+        let status = DataStatus.afterScan(totalFiles: seenFiles.count, failedItems: failedItems)
+        bgStatus = status
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.dataStatus = status
+            self.lastSuccessfulRead = now
             self.modelUsage = aggregator
             self.totalCost = totalC
             self.totalTokens = totalT
@@ -386,6 +413,46 @@ final class ClaudeDataService {
             self.projectRanking = ranking
             self.heatmap = heat
             self.heatmapMax = heatMax
+        }
+    }
+
+    /// Runs on analyticsQueue. Lists the projects folder, or publishes why it can't be read
+    /// (missing or unreadable) and returns nil.
+    private func listProjectsDir(_ projectsDir: String) -> [String]? {
+        let status: DataStatus
+        switch DataStatus.probe(projectsDir) {
+        case .listed(let dirs): return dirs
+        case .missing: status = .noHistory
+        case .unreadable(let reason): status = .inaccessible(reason: reason)
+        }
+        if bgStatus != status {
+            bgStatus = status
+            DispatchQueue.main.async { [weak self] in self?.dataStatus = status }
+        }
+        return nil
+    }
+
+    /// Counts finished files from concurrent workers and reports every ~2% of `total`.
+    private final class ScanProgress: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = 0
+        private let total: Int
+        private let step: Int
+        private let report: (_ read: Int, _ total: Int) -> Void
+
+        init(total: Int, report: @escaping (_ read: Int, _ total: Int) -> Void) {
+            self.total = total
+            self.step = max(1, total / 50)
+            self.report = report
+            report(0, total)
+        }
+
+        func fileDone() {
+            lock.lock()
+            done += 1
+            let read = done
+            lock.unlock()
+            if read % step == 0 || read == total { report(read, total) }
         }
     }
 
@@ -627,8 +694,17 @@ final class ClaudeDataService {
     /// with the directory listing (one bulk call per folder) instead of one stat per file, about
     /// four times cheaper on a long history.
     private func listJSONLs(in dir: String) -> [TranscriptFile] {
+        var ignored = 0
+        return listJSONLs(in: dir, failures: &ignored)
+    }
+
+    /// Same walk, adding to `failures` each folder or transcript it found but couldn't read.
+    private func listJSONLs(in dir: String, failures: inout Int) -> [TranscriptFile] {
         let base = URL(fileURLWithPath: dir, isDirectory: true)
-        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: Self.listingKeys) else { return [] }
+        var walkErrors = 0
+        defer { failures += walkErrors }
+        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: Self.listingKeys,
+                                                      errorHandler: { _, _ in walkErrors += 1; return true }) else { return [] }
         // Paths keep the form the caller passed (the enumerator reports the real path of a
         // symlinked parent, e.g. /var -> /private/var): they are cache keys shared with the
         // other scans.
@@ -642,7 +718,10 @@ final class ClaudeDataService {
         for case let url as URL in en where url.lastPathComponent.hasSuffix(".jsonl") {
             guard let values = try? url.resourceValues(forKeys: Self.listingKeySet),
                   let mtime = values.contentModificationDate,
-                  let root = roots.first(where: { url.path.hasPrefix($0) }) else { continue }
+                  let root = roots.first(where: { url.path.hasPrefix($0) }) else {
+                walkErrors += 1
+                continue
+            }
             result.append(TranscriptFile(path: prefix + url.path.dropFirst(root.count), mtime: mtime,
                                          size: UInt64(values.fileSize ?? 0),
                                          fileNumber: values.fileIdentifier ?? 0))
@@ -674,8 +753,16 @@ final class ClaudeDataService {
 
         // (path, mtime, size): from the walk's listing, or one stat per known file in between.
         var candidates: [(path: String, mtime: Date, size: UInt64)] = []
+        // A known file that can no longer be stat-ed: this tick doesn't count as a full read.
+        var statFailed = false
         if now.timeIntervalSince(todayLastWalk) >= Self.todayWalkInterval {
-            guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
+            guard let dirs = listProjectsDir(projectsDir) else { return }
+            // The history appeared (or became readable) since the last heavy scan: read it now
+            // instead of waiting up to five minutes.
+            switch bgStatus {
+            case .noHistory, .inaccessible: unifiedFullScan()
+            case .loading, .partial, .ready: break
+            }
             let groupFilter = bgSelectedGroup
             for dir in dirs {
                 if let group = groupFilter {
@@ -689,7 +776,10 @@ final class ClaudeDataService {
         } else {
             for path in todayFileCaches.keys {
                 guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-                      let mtime = attrs[.modificationDate] as? Date else { continue }
+                      let mtime = attrs[.modificationDate] as? Date else {
+                    statFailed = true
+                    continue
+                }
                 candidates.append((path, mtime, (attrs[.size] as? NSNumber)?.uint64Value ?? 0))
             }
         }
@@ -763,9 +853,12 @@ final class ClaudeDataService {
             sumCalls += c.calls
             sumActivity.merge(c.activityIncludingPending)
         }
+        // Only a read of history already known to be readable refreshes "Updated …".
+        let readAt: Date? = bgStatus.showsFigures && !statFailed ? now : nil
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            if let readAt { self.lastSuccessfulRead = readAt }
             self.todayCost = sumCost
             self.todayTokens = sumTokens
             self.todayCalls = sumCalls

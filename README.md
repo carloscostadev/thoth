@@ -31,13 +31,23 @@ from `~/.claude/`.
   Active, Sprinting.
 - **Activity breakdown.** What you're actually doing today (Conversation,
   Coding, Exploration, Terminal, Planning, Design), classified from the tools
-  used in each assistant turn.
+  used in each assistant turn. The ⓘ next to the section lists the rule for
+  each category: it's an inference from tool calls, not a measure of time or
+  intent.
 - **Model breakdown.** Per-model cost and token share (Fable, Mythos, Opus,
   Sonnet, Haiku), priced with a built-in copy of Anthropic's API list prices
-  (last checked 2026-10-23, Claude 5 family included). A model version newer
-  than the table uses the closest known version of its family until the app
-  is updated. Costs are API-equivalent estimates, not what a Claude
-  subscription bills you.
+  (last checked 2026-10-23, Claude 5 family included). A model version
+  without its own price in the table uses the closest known version of its
+  family until the app is updated; such rows are marked ≈ with the reference
+  rates used (e.g. "≈ opus-5-5 rates"). Costs are API-equivalent estimates,
+  not what a Claude subscription bills you.
+- **Data status.** The footer shows when the history was last read ("Updated
+  just now"). While the first read runs (with a file count), when
+  `~/.claude/projects` doesn't exist, can't be read, or some transcripts
+  couldn't be read, a notice says so. Until a read succeeds, today's figures
+  show "—" and the tabs hold no lists, only a "—" card saying why, so a real
+  `$0.00` never looks like a failed read. A partial read keeps its figures,
+  with the notice.
 - **Trends tab.** Last-30-days daily cost chart, projected month-end cost and
   prompt-cache savings.
 - **Projects tab.** Top projects by cost (resolved from each session's first
