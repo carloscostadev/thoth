@@ -25,23 +25,22 @@ struct LogFormatCompatibilityTests {
         let description: String
         /// Where the file sits in its project folder; a session's main transcript by default.
         let path: String?
-        /// Priced, dated responses: what the heavy scan counts.
+        /// Dated responses of Claude models: what the heavy scan counts.
         let calls: Int
         let tokens: Tokens
-        /// USD, at the rates of `ModelPricing.all`.
+        /// USD, at the rates of `ModelPricing.all`; models without a known price add 0.
         let cost: Double
         /// Model rows (canonical ids) of the counted responses.
         let models: [String]
-        /// Responses without a known price (`<synthetic>`, unknown families), left out of the totals.
-        let unpricedCalls: Int?
-        /// Priced responses without a usable timestamp, left out of the totals.
-        let undatedCalls: Int?
+        /// Responses that aren't counted (`<synthetic>`, other vendors' models).
+        let uncountedCalls: Int?
+        /// Responses without a usable timestamp are not reported: they are `incomplete` lines.
         let ignored: Ignored
     }
 
     /// What one read produced, in the terms of `Expectation`.
     struct Totals: Equatable {
-        var calls = 0, unpricedCalls = 0, undatedCalls = 0
+        var calls = 0, uncountedCalls = 0
         var tokens = Expectation.Tokens()
         var cost = 0.0
         var models: Set<String> = []
@@ -49,8 +48,7 @@ struct LogFormatCompatibilityTests {
 
         mutating func add(_ record: UsageRecord) {
             let newCall = record.isCorrection ? 0 : 1
-            guard record.pricing != nil else { unpricedCalls += newCall; return }
-            guard record.timestamp != nil else { undatedCalls += newCall; return }
+            guard record.isCounted else { uncountedCalls += newCall; return }
             calls += newCall
             tokens.input += record.usage.inputTokens
             tokens.output += record.usage.outputTokens
@@ -78,8 +76,7 @@ struct LogFormatCompatibilityTests {
 
         init(_ e: Expectation) {
             calls = e.calls
-            unpricedCalls = e.unpricedCalls ?? 0
-            undatedCalls = e.undatedCalls ?? 0
+            uncountedCalls = e.uncountedCalls ?? 0
             tokens = e.tokens
             cost = e.cost
             models = Set(e.models)
@@ -254,16 +251,21 @@ struct LogFormatCompatibilityTests {
     /// Every accepted timestamp shape lands on the same instant as Claude Code's own form.
     @Test func timestampsKeepTheirInstant() throws {
         let fixture = try Self.fixture("timestamps")
-        var dates: [String: Date?] = [:]
+        var dates: [String: Date] = [:]
+        var ignored: [IgnoredLine] = []
         var open: OpenResponse?
-        UsageLogParser.parse(fixture.data, open: &open) { dates[$0.messageId ?? ""] = $0.timestamp }
+        UsageLogParser.parse(fixture.data, open: &open, onIgnored: { ignored.append($0) }) {
+            dates[$0.messageId ?? ""] = $0.timestamp
+        }
         let base = UsageLogParser.parseTimestamp("2026-10-20T10:00:00.000Z")!
         let offsets: [String: Double] = ["msg_t0": 0, "msg_t1": 1, "msg_t2": 2, "msg_t3": 3.123, "msg_t4": 4.5, "msg_t5": 5]
         for (id, offset) in offsets {
-            let date = dates[id] ?? nil
+            let date = dates[id]
             #expect(date.map { abs($0.timeIntervalSince(base) - offset) < 0.001 } == true, "\(id): \(String(describing: date))")
         }
-        #expect(dates["msg_t6"] == .some(nil)) // no zone
+        // No zone: ignored as incomplete, not reported.
+        #expect(dates["msg_t6"] == nil)
+        #expect(ignored == [.incomplete])
     }
 
     /// Lines of several megabytes, far longer than a read chunk, with and without usage.
@@ -292,9 +294,8 @@ struct LogFormatCompatibilityTests {
         try await checkFullScan(fixture)
     }
 
-    /// Known gap: a resumed or forked session can start a new transcript that repeats responses
-    /// already logged in the one it came from (same message id and request id). Deduplication only
-    /// looks at consecutive lines of one file, so such copies are counted again.
+    /// A resumed or forked session can start a new transcript that repeats responses already
+    /// logged in the one it came from (same message id and request id): they count once.
     @Test func responsesCopiedIntoAnotherSessionAreCountedOnce() async throws {
         let fixture = try Self.fixture("streaming-repeats")
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("thoth-format-\(UUID().uuidString)")
@@ -307,8 +308,9 @@ struct LogFormatCompatibilityTests {
         let service = ClaudeDataService(claudeDir: root.path)
         service.unifiedFullScan()
         await drainMainQueue()
-        withKnownIssue("Responses repeated across transcripts are not deduplicated") {
-            #expect(service.allTimeCalls == fixture.expectation.calls)
-        }
+        let e = fixture.expectation
+        #expect(service.allTimeCalls == e.calls)
+        #expect(service.allTimeTokens == e.tokens.input + e.tokens.output + e.tokens.cacheWrite + e.tokens.cacheRead)
+        #expect(abs(service.allTimeCost - e.cost) < 1e-9)
     }
 }

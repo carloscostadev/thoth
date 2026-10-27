@@ -19,6 +19,13 @@ struct ModelsTabView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if entries.contains(where: \.hasNoKnownPrice) {
+                Text("? No known price: counted in tokens and calls, left out of the cost totals.")
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -35,7 +42,7 @@ struct ModelsTabView: View {
                     .font(Theme.Font.bodyEmphasis)
                     .foregroundStyle(Theme.Palette.textPrimary)
                 if let note = entry.pricingNote {
-                    Text("≈")
+                    Text(entry.hasNoKnownPrice ? "?" : "≈")
                         .font(Theme.Font.bodyEmphasis)
                         .foregroundStyle(Theme.Palette.caution)
                         .help(note)
@@ -61,6 +68,7 @@ struct ModelsTabView: View {
 
     private func detail(_ entry: ModelUsageEntry) -> String {
         let base = "\(formatTokens(entry.totalTokens)) tokens · \(entry.sessionCount) sessions"
+        if entry.hasNoKnownPrice { return base + " · no known price" }
         guard let match = entry.pricingMatch, !match.isExact else { return base }
         return base + " · ≈ \(match.referenceName) rates"
     }

@@ -23,6 +23,29 @@ struct ModelIdentifier: Equatable {
     }
 
     static func parse(_ raw: String) -> ModelIdentifier? {
+        guard let parts = claudeParts(raw) else { return nil }
+
+        guard let familyIndex = parts.firstIndex(where: { ModelFamily(rawValue: $0) != nil }),
+              let family = ModelFamily(rawValue: parts[familyIndex]) else { return nil }
+        // New naming puts the version after the family, the pre-4 naming before it.
+        let after = Array(parts[(familyIndex + 1)...])
+        let before = Array(parts[..<familyIndex])
+        let versionParts = after.isEmpty ? before : after
+        let numbers = versionParts.prefix(2).compactMap { $0.count <= 2 ? Int($0) : nil }
+        guard let major = numbers.first else { return nil }
+        return ModelIdentifier(family: family, major: major, minor: numbers.count > 1 ? numbers[1] : 0)
+    }
+
+    /// Row key of a Claude model id that `parse` can't read (an unknown family such as
+    /// `claude-nova-1-0`, or no version): the id without provider and date decorations.
+    /// Nil for ids that aren't Claude models (`<synthetic>`, other vendors).
+    static func unknownClaudeModelKey(_ raw: String) -> String? {
+        guard parse(raw) == nil, let parts = claudeParts(raw), !parts.isEmpty else { return nil }
+        return "claude-" + parts.joined(separator: "-")
+    }
+
+    /// The id after its last `claude-`, lowercased, split on "-", without decorations.
+    private static func claudeParts(_ raw: String) -> [String]? {
         var id = raw.lowercased()
         guard let start = id.range(of: "claude-", options: .backwards) else { return nil }
         id = String(id[start.upperBound...])
@@ -38,16 +61,7 @@ struct ModelIdentifier: Equatable {
                 || (last.count > 1 && last.hasPrefix("v") && last.dropFirst().allSatisfy(\.isNumber)) {
             parts.removeLast()
         }
-
-        guard let familyIndex = parts.firstIndex(where: { ModelFamily(rawValue: $0) != nil }),
-              let family = ModelFamily(rawValue: parts[familyIndex]) else { return nil }
-        // New naming puts the version after the family, the pre-4 naming before it.
-        let after = Array(parts[(familyIndex + 1)...])
-        let before = Array(parts[..<familyIndex])
-        let versionParts = after.isEmpty ? before : after
-        let numbers = versionParts.prefix(2).compactMap { $0.count <= 2 ? Int($0) : nil }
-        guard let major = numbers.first else { return nil }
-        return ModelIdentifier(family: family, major: major, minor: numbers.count > 1 ? numbers[1] : 0)
+        return parts
     }
 
     fileprivate var versionKey: Int { major * 100 + minor }

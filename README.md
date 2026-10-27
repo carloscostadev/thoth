@@ -39,8 +39,11 @@ from `~/.claude/`.
   (last checked 2026-10-23, Claude 5 family included). A model version
   without its own price in the table uses the closest known version of its
   family until the app is updated; such rows are marked ≈ with the reference
-  rates used (e.g. "≈ opus-5-5 rates"). Costs are API-equivalent estimates,
-  not what a Claude subscription bills you.
+  rates used (e.g. "≈ opus-5-5 rates"). A Claude model of a family the table
+  doesn't know (e.g. `claude-nova-1`) still counts in tokens and calls, at a
+  cost of $0: its row is marked ? with "no known price", and the cost totals
+  leave it out. Costs are API-equivalent estimates, not what a Claude
+  subscription bills you.
 - **Data status.** The footer shows when the history was last read ("Updated
   just now"). While the first read runs (with a file count), when
   `~/.claude/projects` doesn't exist, can't be read, or some transcripts
@@ -69,6 +72,16 @@ tree and the `~/.claude/sessions/*.json` heartbeats, aggregates the
 card. Claude Code writes one line per content block with the same
 `message.id`, and streams `output_tokens` up to the final count on the last
 one, so every response is counted once, with its final values.
+
+A resumed or forked session can start a new transcript that repeats responses
+already logged in the one it came from. Each response is identified by its
+`message.id` and `requestId` (either one when the other is missing), and every
+scan (heavy, today, active-session poll) checks one shared registry of which
+transcript counts it, so a copy in another file is not counted again. If the
+transcript that counted it disappears, the copy is counted instead. Responses
+without a usable timestamp (missing, or without a time zone) belong to no day:
+every scan leaves them out and reports them as ignored (incomplete) lines.
+`<synthetic>` placeholders and other vendors' models are not counted.
 
 To stay cheap on a large history (the author's local tree is ~450 MB across
 ~600 files), scanning is layered:
@@ -146,8 +159,9 @@ When the format changes, add a fixture instead of editing an existing one:
 2. Add `<name>.expected.json` next to it with the totals of the responses
    that should count: `calls`, `tokens` (`input`, `output`, `cacheWrite`,
    `cacheRead`), `cost` in USD worked out from the rates in `Pricing.swift`,
-   `models` (canonical ids), and `ignored` (`malformed`, `incomplete`).
-   Optional: `unpricedCalls`, `undatedCalls`, and `path` when the file lives
+   `models` (canonical ids), and `ignored` (`malformed`, `incomplete`, which
+   includes responses without a usable timestamp). Optional: `uncountedCalls`
+   (`<synthetic>`, other vendors' models), and `path` when the file lives
    elsewhere in the project folder (e.g. `<session>/subagents/agent-x.jsonl`).
 3. Run `swift test --filter LogFormatCompatibility`. The new fixture is
    picked up automatically; list its name in

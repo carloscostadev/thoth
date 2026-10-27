@@ -352,6 +352,166 @@ struct ScanCorrectnessTests {
         #expect(service.totalTokens - before == 1_000)
     }
 
+    // MARK: - Counting consistency
+
+    /// Settable clock, to get past the today summary's one-minute walk interval.
+    private final class TestClock: @unchecked Sendable {
+        var now = Date()
+    }
+
+    /// A transcript folder for `cwd`, the response lines written into it, and a live session.
+    private struct Transcripts {
+        static let cwd = "/srv/Documents/Acme/app"
+        let history: SyntheticHistory
+        var dir: URL { history.projectsDir.appendingPathComponent(SyntheticHistory.encode(cwd: Self.cwd)) }
+
+        init() throws {
+            history = try SyntheticHistory(models: [], seed: 1)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+
+        /// One line of response `id`; `ts: nil` writes no timestamp.
+        static func line(_ id: String, model: String = "claude-opus-5-5", input: Int = 1000, output: Int,
+                         ts: String? = SyntheticHistory.timestamp(Date().addingTimeInterval(-30))) -> String {
+            let timestamp = ts.map { #""timestamp":"\#($0)","# } ?? ""
+            return #"{"type":"assistant","cwd":"\#(cwd)",\#(timestamp)"requestId":"req_\#(id)","message":{"id":"\#(id)","model":"\#(model)","content":[],"usage":{"input_tokens":\#(input),"output_tokens":\#(output),"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#
+                + "\n"
+        }
+
+        func write(_ text: String, to name: String, append: Bool = false) throws {
+            let url = dir.appendingPathComponent(name)
+            if append, let h = FileHandle(forWritingAtPath: url.path) {
+                try h.seekToEnd()
+                try h.write(contentsOf: Data(text.utf8))
+                try h.close()
+            } else {
+                try Data(text.utf8).write(to: url)
+            }
+            // A visible mtime change for each write, still today.
+            let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date) ?? Date()
+            try FileManager.default.setAttributes([.modificationDate: max(mtime, Date()).addingTimeInterval(1)],
+                                                  ofItemAtPath: url.path)
+        }
+
+        /// Heartbeat of a live session whose transcript is `<sessionId>.jsonl`.
+        func startSession(_ sessionId: String) throws {
+            let json: [String: Any] = [
+                "pid": Int(getpid()), "sessionId": sessionId, "cwd": Self.cwd,
+                "startedAt": Int64(Date().timeIntervalSince1970 * 1000), "kind": "interactive", "entrypoint": "cli",
+            ]
+            try JSONSerialization.data(withJSONObject: json)
+                .write(to: history.root.appendingPathComponent("sessions/\(sessionId).json"))
+        }
+    }
+
+    /// Opus 5.5 at 1000 input tokens: input $4 / MTok, output $20 / MTok.
+    private func opusCost(output: Int) -> Double { (1000 * 4.0 + Double(output) * 20.0) / 1_000_000 }
+
+    /// A resumed session's transcript repeats responses of the original one: the heavy scan
+    /// (cold and incremental), the today summary and the active-session poll all count them once,
+    /// and they still count once the original transcript is gone.
+    @Test func copiedResponsesCountOnceInEveryScan() async throws {
+        let t = try Transcripts()
+        defer { t.history.remove() }
+        let clock = TestClock()
+        let service = ClaudeDataService(claudeDir: t.history.root.path, now: { clock.now })
+        typealias T = Transcripts
+        let r1 = T.line("msg_1", output: 10) + T.line("msg_1", output: 200)
+        let r2 = T.line("msg_2", output: 300)
+        try t.write(r1 + r2, to: "original.jsonl")
+        service.unifiedFullScan()
+        service.computeTodaySummaries()
+        await drainMainQueue()
+        #expect(service.allTimeCalls == 2 && service.todayCalls == 2)
+
+        // Resumed: the copies first (the stream's last line only), then a new response while live.
+        try t.write(T.line("msg_1", output: 200) + r2, to: "resumed.jsonl")
+        try t.startSession("resumed")
+        service.loadSessions()
+        let before = service.totalTokens
+        try t.write(T.line("msg_3", output: 50), to: "resumed.jsonl", append: true)
+        service.pollActiveSessions()
+        await drainMainQueue()
+        #expect(service.totalTokens - before == 1050)
+
+        let expectedTokens = 3 * 1000 + 200 + 300 + 50
+        let expectedCost = opusCost(output: 200) + opusCost(output: 300) + opusCost(output: 50)
+        service.unifiedFullScan()
+        clock.now = clock.now.addingTimeInterval(61) // the today summary walks the tree again
+        service.computeTodaySummaries()
+        await drainMainQueue()
+        #expect(service.allTimeCalls == 3)
+        #expect(service.allTimeTokens == expectedTokens)
+        #expect(abs(service.allTimeCost - expectedCost) < 1e-12)
+        #expect(service.todayCalls == 3 && service.todayTokens == expectedTokens)
+        #expect(abs(service.todayCost - expectedCost) < 1e-12)
+        expectSameScan(service, await coldScan(t.history.root))
+
+        // The original is deleted: the resumed transcript now counts the copies.
+        try FileManager.default.removeItem(at: t.dir.appendingPathComponent("original.jsonl"))
+        service.unifiedFullScan()
+        service.computeTodaySummaries()
+        await drainMainQueue()
+        #expect(service.allTimeCalls == 3 && service.allTimeTokens == expectedTokens)
+        #expect(service.todayCalls == 3 && service.todayTokens == expectedTokens)
+        expectSameScan(service, await coldScan(t.history.root))
+    }
+
+    /// A Claude model of an unknown family counts in calls and tokens, at no cost, in every scan,
+    /// and gets a row marked as having no known price.
+    @Test func unknownFamilyModelsCountWithoutCost() async throws {
+        let t = try Transcripts()
+        defer { t.history.remove() }
+        try t.write(Transcripts.line("msg_n", model: "claude-nova-1-0", output: 500)
+                    + Transcripts.line("msg_o", output: 100)
+                    + Transcripts.line("msg_s", model: "<synthetic>", input: 0, output: 0), to: "session.jsonl")
+        let service = ClaudeDataService(claudeDir: t.history.root.path)
+        service.unifiedFullScan()
+        service.computeTodaySummaries()
+        await drainMainQueue()
+
+        #expect(service.allTimeCalls == 2 && service.todayCalls == 2)
+        #expect(service.allTimeTokens == 2600 && service.todayTokens == 2600)
+        #expect(abs(service.allTimeCost - opusCost(output: 100)) < 1e-12)
+        #expect(abs(service.todayCost - opusCost(output: 100)) < 1e-12)
+        let rows = Dictionary(uniqueKeysWithValues: service.modelUsage.entries.map { ($0.modelId, $0) })
+        #expect(Set(rows.keys) == ["claude-nova-1-0", "claude-opus-5-5"])
+        let nova = try #require(rows["claude-nova-1-0"])
+        #expect(nova.totalTokens == 1500 && nova.totalCost == 0 && nova.sessionCount == 1)
+        #expect(nova.hasNoKnownPrice && !nova.hasApproximatePricing)
+        #expect(rows["claude-opus-5-5"]?.hasNoKnownPrice == false)
+    }
+
+    /// A response without a usable timestamp belongs to no day: the heavy scan, the today
+    /// summary and the active-session poll all leave it out.
+    @Test func undatedResponsesAreLeftOutByEveryScan() async throws {
+        let t = try Transcripts()
+        defer { t.history.remove() }
+        typealias T = Transcripts
+        try t.write(T.line("msg_a", output: 100) + T.line("msg_u", output: 900, ts: nil)
+                    + T.line("msg_z", output: 900, ts: "2026-10-20T10:00:00.000"), to: "live.jsonl")
+        try t.startSession("live")
+        let service = ClaudeDataService(claudeDir: t.history.root.path)
+        service.loadSessions()
+        service.unifiedFullScan()
+        service.computeTodaySummaries()
+        await drainMainQueue()
+        #expect(service.allTimeCalls == 1 && service.todayCalls == 1)
+        #expect(service.allTimeTokens == 1100 && service.todayTokens == 1100)
+
+        // Appended while live: an undated response, then a dated one.
+        let before = service.totalTokens
+        try t.write(T.line("msg_v", output: 900, ts: nil) + T.line("msg_b", output: 200), to: "live.jsonl", append: true)
+        service.pollActiveSessions()
+        service.unifiedFullScan()
+        service.computeTodaySummaries()
+        await drainMainQueue()
+        #expect(service.totalTokens - before == 1200)
+        #expect(service.allTimeCalls == 2 && service.todayCalls == 2)
+        #expect(service.allTimeTokens == 2300 && service.todayTokens == 2300)
+        #expect(abs(service.todayCost - service.allTimeCost) < 1e-12)
+    }
+
     @Test func projectDirNameMatchesClaudeCodeEncoding() {
         #expect(ClaudeDataService.projectDirName(forCwd: "/home/dev/Documents/Acme/app") == "-home-dev-Documents-Acme-app")
         #expect(ClaudeDataService.projectDirName(forCwd: "/a/My Project_v1.2") == "-a-My-Project-v1-2")

@@ -49,7 +49,7 @@ private func line(id: String, model: String = "claude-sonnet-5-5", block: String
         #"{"type":"assistant","message":{"id":"x","model":"claude-opus-5-5","content":[{"type":"tool_use","name":"Edit","input":{"usage":{"input_tokens":999}}}]}}"#,
         #"not json at all "usage": "#,
         "",
-        #"{"type":"assistant","message":{"id":"y","model":"<synthetic>","content":"oops","usage":{"input_tokens":0,"output_tokens":0}}}"#,
+        #"{"type":"assistant","timestamp":"2026-10-23T09:12:34.567Z","message":{"id":"y","model":"<synthetic>","content":"oops","usage":{"input_tokens":0,"output_tokens":0}}}"#,
     ].joined(separator: "\n") + "\n"
     var open: OpenResponse?
     var records: [UsageRecord] = []

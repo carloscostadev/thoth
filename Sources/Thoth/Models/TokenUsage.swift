@@ -109,9 +109,16 @@ struct ModelUsageEntry: Identifiable {
     /// True when the cost uses another version's rates (no exact price for this version).
     var hasApproximatePricing: Bool { pricingMatch.map { !$0.isExact } ?? false }
 
-    /// Tooltip for an approximate price, nil when the price is the model's own.
+    /// True for a Claude model of a family the rate card doesn't know: its tokens and calls
+    /// are counted, its cost is 0 and left out of the cost totals.
+    var hasNoKnownPrice: Bool { pricingMatch == nil }
+
+    /// Tooltip for an approximate or missing price, nil when the price is the model's own.
     var pricingNote: String? {
-        guard let match = pricingMatch, !match.isExact else { return nil }
+        guard let match = pricingMatch else {
+            return "No known price for \(displayName): its tokens and calls are counted, its cost is not, so the cost totals leave it out."
+        }
+        guard !match.isExact else { return nil }
         return "No list price for \(displayName) yet: costed at \(match.referenceName) rates, the closest known version of the family. Approximate."
     }
 
@@ -124,7 +131,7 @@ struct ModelUsageEntry: Identifiable {
 
     /// Row key for a raw model id from the logs.
     static func key(for model: String) -> String {
-        ModelIdentifier.parse(model)?.canonical ?? model
+        ModelIdentifier.parse(model)?.canonical ?? ModelIdentifier.unknownClaudeModelKey(model) ?? model
     }
 }
 

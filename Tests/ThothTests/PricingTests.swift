@@ -148,6 +148,26 @@ func listedVersionsAreExactMatches(id: String) throws {
     #expect(rows["claude-sonnet-5-5"]?.pricingNote == nil)
 }
 
+@Test func claudeModelsOfUnknownFamiliesGetARowWithoutPrice() {
+    #expect(ModelIdentifier.unknownClaudeModelKey("claude-nova-1-0") == "claude-nova-1-0")
+    #expect(ModelIdentifier.unknownClaudeModelKey("us.anthropic.claude-nova-1-0-v1:0") == "claude-nova-1-0")
+    #expect(ModelIdentifier.unknownClaudeModelKey("claude-nova-1-0-20290101") == "claude-nova-1-0")
+    // Known families have their canonical key; non-Claude ids are not counted at all.
+    for id in ["claude-opus-6", "<synthetic>", "other-vendor-model", "gpt-4o", "", "claude-"] {
+        #expect(ModelIdentifier.unknownClaudeModelKey(id) == nil, "\(id)")
+    }
+    #expect(ModelUsageEntry.key(for: "us.anthropic.claude-nova-1-0-v1:0") == "claude-nova-1-0")
+
+    var aggregator = ModelUsageAggregator()
+    let usage = TokenUsage(inputTokens: 100, outputTokens: 100, cacheWriteTokens: 0, cacheReadTokens: 0)
+    aggregator.add(usage: usage, model: "claude-nova-1-0")
+    let row = aggregator.entries.first
+    #expect(row?.totalCost == 0 && row?.totalTokens == 200)
+    #expect(row?.hasNoKnownPrice == true && row?.hasApproximatePricing == false)
+    #expect(row?.pricingNote?.contains("No known price") == true)
+    #expect(ModelUsageEntry(modelId: "claude-opus-5-5").hasNoKnownPrice == false)
+}
+
 @Test func unknownModelsReturnNil() {
     for id in ["unknown-model", "<synthetic>", "claude-instant-1.2", "claude-2.1", "gpt-4o", "", "claude-", "claude-opus"] {
         #expect(ModelPricing.forModel(id) == nil, "\(id)")

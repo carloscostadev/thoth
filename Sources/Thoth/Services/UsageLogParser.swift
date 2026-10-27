@@ -5,6 +5,9 @@ import Foundation
 /// response reported just before it (`isCorrection`).
 struct UsageRecord {
     let messageId: String?
+    /// Identifies the response across transcripts (message id + request id); see
+    /// `UsageLogParser.responseKey`. Nil when the line has neither.
+    let responseKey: Int?
     let model: String
     /// nil for models without known rates (e.g. `<synthetic>`); such records cost nothing.
     let pricing: ModelPricing?
@@ -12,17 +15,19 @@ struct UsageRecord {
     /// already reported for it, so consumers can simply add it.
     let usage: TokenUsage
     /// For a correction, the timestamp of the response it corrects (same day / hour bucket).
-    let timestamp: Date?
+    /// Responses without a usable timestamp are not reported (see `IgnoredLine.incomplete`).
+    let timestamp: Date
     let isAssistant: Bool
     let toolNames: [String]
     /// A correction adds tokens and cost to a response already counted; it is not a new call.
     let isCorrection: Bool
     let cost: Double
 
-    init(messageId: String?, model: String, pricing: ModelPricing?, usage: TokenUsage,
-         timestamp: Date?, isAssistant: Bool, toolNames: [String],
+    init(messageId: String?, responseKey: Int? = nil, model: String, pricing: ModelPricing?, usage: TokenUsage,
+         timestamp: Date, isAssistant: Bool, toolNames: [String],
          isCorrection: Bool = false, cost: Double? = nil) {
         self.messageId = messageId
+        self.responseKey = responseKey
         self.model = model
         self.pricing = pricing
         self.usage = usage
@@ -32,13 +37,21 @@ struct UsageRecord {
         self.isCorrection = isCorrection
         self.cost = cost ?? pricing.map(usage.cost(with:)) ?? 0
     }
+
+    /// Counted in tokens and calls: a priced model, or a Claude model without a known price
+    /// (cost 0). `<synthetic>` and other vendors' models are not.
+    var isCounted: Bool {
+        pricing != nil || ModelIdentifier.unknownClaudeModelKey(model) != nil
+    }
 }
 
 /// The response whose lines are being read: what has been reported for it so far.
 struct OpenResponse {
     let id: String
+    let key: Int?
     let model: String
     let pricing: ModelPricing?
+    /// Nil for a response without a usable timestamp: its lines are ignored.
     let timestamp: Date?
     let isAssistant: Bool
     var usage: TokenUsage
@@ -58,7 +71,8 @@ struct UsageLogCursor {
 enum IgnoredLine: Equatable {
     /// Not a JSON object (garbage, a truncated write), or a `"usage":` line that fails to decode.
     case malformed
-    /// Its `message` has a `usage` key, but no model or a usage that can't be read.
+    /// Its `message` has a `usage` key, but no model, a usage that can't be read, or no usable
+    /// timestamp (missing, or without a time zone). Reported once per response.
     case incomplete
 }
 
@@ -239,6 +253,8 @@ enum UsageLogParser {
         let responseId = message.id ?? entry.requestId
 
         if let id = responseId, var open = state.open, open.id == id {
+            // The rest of a response left out for its missing timestamp.
+            guard let timestamp = open.timestamp else { return }
             onContinuation?(toolNames)
             // Later lines of a streamed response repeat its usage with more output; count the
             // growth. A line with less output than already counted is stale and ignored.
@@ -246,10 +262,11 @@ enum UsageLogParser {
             let cost = open.pricing.map(usage.cost(with:)) ?? 0
             onRecord(UsageRecord(
                 messageId: id,
+                responseKey: open.key,
                 model: open.model,
                 pricing: open.pricing,
                 usage: usage.subtracting(open.usage),
-                timestamp: open.timestamp,
+                timestamp: timestamp,
                 isAssistant: open.isAssistant,
                 toolNames: [],
                 isCorrection: true,
@@ -269,20 +286,42 @@ enum UsageLogParser {
             state.pricingCache[model] = pricing
         }
 
+        let key = responseKey(messageId: message.id, requestId: entry.requestId)
+        // Without a timestamp a response belongs to no day: every scan leaves it out.
+        guard let timestamp = entry.timestamp.flatMap(parseTimestamp) else {
+            state.open = responseId.map {
+                OpenResponse(id: $0, key: key, model: model, pricing: pricing, timestamp: nil,
+                             isAssistant: entry.type == "assistant", usage: usage, cost: 0)
+            }
+            onIgnored?(.incomplete)
+            return
+        }
         let record = UsageRecord(
             messageId: responseId,
+            responseKey: key,
             model: model,
             pricing: pricing,
             usage: usage,
-            timestamp: entry.timestamp.flatMap(parseTimestamp),
+            timestamp: timestamp,
             isAssistant: entry.type == "assistant",
             toolNames: toolNames
         )
         state.open = responseId.map {
-            OpenResponse(id: $0, model: model, pricing: pricing, timestamp: record.timestamp,
+            OpenResponse(id: $0, key: key, model: model, pricing: pricing, timestamp: timestamp,
                          isAssistant: record.isAssistant, usage: usage, cost: record.cost)
         }
         onRecord(record)
+    }
+
+    /// Identifies a response across transcripts: a resumed or forked session copies responses
+    /// of the one it came from into its own file, with the same message id and request id.
+    /// Either one alone is enough (the same fallback as within a file); nil without both.
+    static func responseKey(messageId: String?, requestId: String?) -> Int? {
+        guard messageId != nil || requestId != nil else { return nil }
+        var hasher = Hasher()
+        hasher.combine(messageId)
+        hasher.combine(requestId)
+        return hasher.finalize()
     }
 
     // MARK: - Line schema (only the fields Thoth reads)

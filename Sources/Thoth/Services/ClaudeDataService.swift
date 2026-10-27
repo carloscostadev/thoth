@@ -83,6 +83,8 @@ final class ClaudeDataService {
     @ObservationIgnored private var cwdGroups: [String: String] = [:]
     /// Background copy of `dataStatus`.
     @ObservationIgnored private var bgStatus: DataStatus = .initial
+    /// Which transcript counts each response, shared by every scan; see `ResponseRegistry`.
+    @ObservationIgnored private let responses = ResponseRegistry()
 
     private struct TodayFileCache {
         var mtime: Date = .distantPast
@@ -132,6 +134,9 @@ final class ClaudeDataService {
         var totalCost: Double = 0
         var totalTokens: Int = 0
         var totalCalls: Int = 0
+        /// Responses left out because another transcript counts them. If that transcript
+        /// goes away, this one is read again so they are counted here.
+        var duplicatesSkipped: Int = 0
     }
 
     @ObservationIgnored private var pollTimer: Timer?
@@ -245,17 +250,41 @@ final class ClaudeDataService {
                 if let cached, cached.mtime == mtime, cached.size == size {
                     continue
                 }
-                // Claude Code only appends to a transcript: the same file, not smaller, carries on
-                // from where the last scan stopped.
-                let base = cached.flatMap { $0.fileNumber == fileNumber && size >= $0.size ? $0 : nil }
+                // Claude Code only appends to a transcript: the same file, not smaller, still with a
+                // line break where the last scan stopped, carries on from there.
+                let base = cached.flatMap {
+                    $0.fileNumber == fileNumber && size >= $0.size && Self.endsLine(atPath: filePath, offset: $0.cursor.offset)
+                        ? $0 : nil
+                }
                 jobs.append(FullScanJob(path: filePath, mtime: mtime, fileNumber: fileNumber,
                                         heuristicGroup: heuristicGroupName, base: base))
             }
         }
 
+        // A transcript that disappeared, or is read again from the start, no longer counts the
+        // responses it held: free them, and re-read the transcripts that left them out as copies.
+        let gone = Set(fullScanCaches.keys).subtracting(seenFiles)
+        let restarted = jobs.filter { $0.base == nil && fullScanCaches[$0.path] != nil }.map(\.path)
+        if !gone.isEmpty || !restarted.isEmpty,
+           responses.release(ownedBy: gone.union(restarted)) > 0 {
+            let queued = Set(jobs.map(\.path))
+            for (path, cache) in fullScanCaches where cache.duplicatesSkipped > 0 && !gone.contains(path) {
+                if queued.contains(path) {
+                    if let i = jobs.firstIndex(where: { $0.path == path }) { jobs[i].base = nil }
+                } else {
+                    jobs.append(FullScanJob(path: path, mtime: cache.mtime, fileNumber: cache.fileNumber,
+                                            heuristicGroup: cache.heuristicGroup, base: nil))
+                }
+            }
+            // Today's per-file sums were split by the old owners.
+            todayFileCaches.removeAll()
+            todayLastWalk = .distantPast
+        }
+
         // Re-parse them. Files are independent, so a cold start (every file) spreads over the
         // available cores; results are merged back here, on analyticsQueue.
         let pending = jobs
+        let responses = self.responses
         // The first read since launch reports its progress (a cold start can take seconds).
         let progress: ScanProgress? = {
             guard case .loading = bgStatus, !pending.isEmpty else { return nil }
@@ -271,7 +300,7 @@ final class ClaudeDataService {
             let slots = buffer // each iteration writes only its own index
             DispatchQueue.concurrentPerform(iterations: pending.count) { i in
                 autoreleasepool {
-                    slots[i] = Self.buildFullFileCache(pending[i], calendar: cal)
+                    slots[i] = Self.buildFullFileCache(pending[i], calendar: cal, responses: responses)
                 }
                 progress?.fileDone()
             }
@@ -286,7 +315,7 @@ final class ClaudeDataService {
         }
 
         // Prune entries for files that disappeared.
-        for key in Array(fullScanCaches.keys) where !seenFiles.contains(key) {
+        for key in gone {
             fullScanCaches.removeValue(forKey: key)
             pollCursors.removeValue(forKey: key)
         }
@@ -462,19 +491,46 @@ final class ClaudeDataService {
         let fileNumber: UInt64
         let heuristicGroup: String
         /// Aggregate of the file's start, read by an earlier scan.
-        let base: FullFileCache?
+        var base: FullFileCache?
+    }
+
+    /// Which transcript counts each response. Resumed and forked sessions copy responses of the
+    /// session they came from into their own file (same message id and request id); the first
+    /// transcript to claim a response counts it, and every scan (heavy, today, poll) asks here,
+    /// so a copy is never counted twice and all of them agree on where it counts.
+    /// Keys are `UsageRecord.responseKey`. Locked: the heavy scan claims from several threads.
+    final class ResponseRegistry: @unchecked Sendable {
+        private let lock = NSLock()
+        private var owners: [Int: String] = [:]
+
+        /// True when `path` counts the response: it was unclaimed, or `path` already counts it.
+        func claim(_ key: Int?, for path: String) -> Bool {
+            guard let key else { return true }
+            lock.lock()
+            defer { lock.unlock() }
+            if let owner = owners[key] { return owner == path }
+            owners[key] = path
+            return true
+        }
+
+        /// Frees the responses counted by `paths`. Returns how many were freed.
+        func release(ownedBy paths: Set<String>) -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            let before = owners.count
+            owners = owners.filter { !paths.contains($0.value) }
+            return before - owners.count
+        }
     }
 
     /// Parses a JSONL file into its time-independent aggregate, plus the read position the
-    /// active-session poll should continue from: from the end of `job.base` when the file still
-    /// has a line break there, else from the start. Pure function of the file and `job`: safe to
-    /// run concurrently. Returns nil if the file can't be read.
-    private static func buildFullFileCache(_ job: FullScanJob,
-                                           calendar cal: Calendar) -> (cache: FullFileCache, cursor: UsageLogCursor)? {
-        var cache = FullFileCache()
-        if let base = job.base, endsLine(atPath: job.path, offset: base.cursor.offset) {
-            cache = base
-        }
+    /// active-session poll should continue from: from the end of `job.base`, else from the start.
+    /// Responses another transcript already counts (`responses`) are left out. Depends only on
+    /// the file, `job` and the registry: safe to run concurrently. Returns nil if the file can't
+    /// be read.
+    private static func buildFullFileCache(_ job: FullScanJob, calendar cal: Calendar,
+                                           responses: ResponseRegistry) -> (cache: FullFileCache, cursor: UsageLogCursor)? {
+        var cache = job.base ?? FullFileCache()
         cache.mtime = job.mtime
         cache.fileNumber = job.fileNumber
         var fileCwd = cache.cwd
@@ -487,7 +543,13 @@ final class ClaudeDataService {
         // The parser looks for a cwd again in every chunk it reads; the session's first one wins.
         let onCwd: ((String) -> Void)? = fileCwd == nil ? { if fileCwd == nil { fileCwd = $0 } } : nil
         let bytesRead = UsageLogParser.parseFile(atPath: job.path, cursor: &cursor, onCwd: onCwd) { record in
-            guard let d = record.timestamp, let pricing = record.pricing else { return }
+            guard record.isCounted else { return }
+            // A correction follows its response: left out with it.
+            guard responses.claim(record.responseKey, for: job.path) else {
+                if !record.isCorrection { cache.duplicatesSkipped += 1 }
+                return
+            }
+            let d = record.timestamp
             let usage = record.usage
             let cost = record.cost
             let toks = usage.totalTokens
@@ -513,8 +575,10 @@ final class ClaudeDataService {
 
             cache.totalCacheRead += usage.cacheReadTokens
             cache.totalInput += usage.inputTokens
-            let rates = pricing.rates(forPromptTokens: usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)
-            cache.savings += Double(usage.cacheReadTokens) * (rates.input - rates.cacheRead) / 1_000_000.0
+            if let pricing = record.pricing {
+                let rates = pricing.rates(forPromptTokens: usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)
+                cache.savings += Double(usage.cacheReadTokens) * (rates.input - rates.cacheRead) / 1_000_000.0
+            }
 
             let bucketKey = Int((d.timeIntervalSince1970 / 900).rounded(.down))
             let bucket: (day: Date, weekday: Int, hour: Int)
@@ -646,8 +710,9 @@ final class ClaudeDataService {
             for filePath in paths {
                 var cursor = pollCursors[filePath] ?? UsageLogCursor()
                 readAppendedLines(of: filePath, cursor: &cursor) { record in
-                    guard record.pricing != nil else { return }
-                    if let filterStart, let date = record.timestamp, date < filterStart { return }
+                    guard record.isCounted else { return }
+                    if let filterStart, record.timestamp < filterStart { return }
+                    guard responses.claim(record.responseKey, for: filePath) else { return }
                     deltaUsages.append((record.usage, record.cost, record.model))
                 }
                 pollCursors[filePath] = cursor
@@ -810,8 +875,8 @@ final class ClaudeDataService {
                     if record.isCorrection {
                         // More output for the response just read: it is still `pending` (or
                         // already summed, when it was not an assistant line).
-                        guard record.pricing != nil else { return }
-                        if let date = record.timestamp, date < todayStart { return }
+                        guard record.isCounted, record.timestamp >= todayStart,
+                              responses.claim(record.responseKey, for: filePath) else { return }
                         cache.cost += record.cost
                         cache.tokens += record.usage.totalTokens
                         cache.pending?.cost += record.cost
@@ -819,9 +884,11 @@ final class ClaudeDataService {
                         return
                     }
                     cache.commitPending()
-                    guard record.pricing != nil else { return }
+                    guard record.isCounted else { return }
                     // Skip entries from before today (file may straddle midnight on first scan).
-                    if let date = record.timestamp, date < todayStart { return }
+                    if record.timestamp < todayStart { return }
+                    // A copy of a response another transcript counts.
+                    guard responses.claim(record.responseKey, for: filePath) else { return }
 
                     let lineCost = record.cost
                     let tokens = record.usage.totalTokens
