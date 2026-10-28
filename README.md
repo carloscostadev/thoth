@@ -15,6 +15,16 @@ project ranking, daily trends and burn rate.
 No API keys. No network requests. No telemetry. Everything is read locally
 from `~/.claude/`.
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/popover-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/popover-light.png">
+    <img src="docs/images/popover-light.png" width="448" alt="The Thoth popover on the Overview tab: today's estimated cost, tokens, calls and burn rate, today's activity by category, cost per period from today to all time, and the start of the per-model breakdown">
+  </picture>
+  <br>
+  <sub>Illustrative data.</sub>
+</p>
+
 ## Quick start
 
 1. Download from [Releases](https://github.com/carloscostadev/thoth/releases/latest)
@@ -152,6 +162,10 @@ swift test
 
 # Optional: benchmark the scans on a large synthetic history (temp dir)
 THOTH_BENCH=1 swift test -c release -Xswiftc -enable-testing --filter ScanBenchmark
+
+# Regenerate the README screenshots from a synthetic history (needs a Retina
+# display and Screen Recording permission for the terminal)
+./scripts/screenshots/capture.sh
 ```
 
 ### Log format fixtures
