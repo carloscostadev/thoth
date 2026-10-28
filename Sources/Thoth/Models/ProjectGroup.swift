@@ -90,81 +90,127 @@ struct ProjectGroup: Identifiable, Hashable {
         return components.last ?? "Unknown"
     }
 
-    /// The project that `cwd` belongs to, when it is a worktree or a scratch folder of another
-    /// project, or nil when `cwd` is a project folder itself. Every rule reads only the path,
-    /// except the first, which reads `<cwd>/.git` through `gitWorktreeRoot`; the rules are tried
-    /// in this order:
+    /// Group of the sessions started in a temporary folder, a scratchpad or a tool worktree whose
+    /// project can't be told: one entry at the end of the picker instead of one per folder.
+    static let temporaryFoldersName = "Temporary folders"
+
+    /// Folders whose contents are temporary: the user's temporary directory, `/tmp` and
+    /// `/var/folders` (with and without the `/private` prefix they resolve to).
+    static let temporaryRoots: [String] = {
+        var roots = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"]
+        let own = (NSTemporaryDirectory() as NSString).standardizingPath
+        for root in [own, own.hasPrefix("/var/") ? "/private" + own : own] where !root.isEmpty && root != "/" {
+            if !roots.contains(where: { root == $0 || root.hasPrefix($0 + "/") }) { roots.append(root) }
+        }
+        return roots
+    }()
+
+    /// Whether `path` is one of `roots` or inside one.
+    static func isTemporary(_ path: String, roots: [String] = temporaryRoots) -> Bool {
+        roots.contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
+
+    /// `isTemporary` for a projects/<dir> folder name, for transcripts read without a cwd.
+    static func isTemporary(encodedDir dir: String) -> Bool {
+        encodedTemporaryRoots.contains { dir == $0 || dir.hasPrefix($0 + "-") }
+    }
+
+    private static let encodedTemporaryRoots = temporaryRoots.map(ClaudeDataService.projectDirName(forCwd:))
+
+    /// Picker order: highest all-time cost first (ties by name), `temporaryFoldersName` last.
+    static func menuOrder(_ costs: [String: Double]) -> [(name: String, cost: Double)] {
+        let entries: [(name: String, cost: Double)] = costs
+            .filter { $0.key != temporaryFoldersName }
+            .map { (name: $0.key, cost: $0.value) }
+        let sorted = entries.sorted { a, b in
+            if a.cost != b.cost { return a.cost > b.cost }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
+        guard let temporary = costs[temporaryFoldersName] else { return sorted }
+        return sorted + [(name: temporaryFoldersName, cost: temporary)]
+    }
+
+    /// The group of the sessions started in a folder, resolved against every working directory in
+    /// the history. Every rule reads only the path, except rule 2, which reads `<cwd>/.git`
+    /// through `gitWorktreeRoot`; the rules are tried in this order:
     ///
-    /// 1. A git worktree whose `.git` file points to `<repo>/.git/worktrees/<name>` → `<repo>`.
-    /// 2. A Claude Code scratchpad, `…/claude-<uid>/<encoded project>/<session>/scratchpad…` →
-    ///    the known folder with that encoded name (else the decoded name).
+    /// 1. A folder in `temporaryRoots` (the temporary directory, `/tmp`, `/var/folders`) or a
+    ///    Claude Code scratchpad (`…/claude-<uid>/<encoded project>/<session>/scratchpad…`) →
+    ///    `temporaryFoldersName`.
+    /// 2. A git worktree whose `.git` file points to `<repo>/.git/worktrees/<name>` → `<repo>`.
     /// 3. `<repo>/.claude/worktrees/<name>…` and `<repo>/.worktrees/<name>…` → `<repo>`.
     /// 4. Horus worktrees, `…/parallel-worktrees/<repo name>-<8 hex>/<name>…` → the known folder
     ///    named `<repo name>` that shares the longest path prefix with `cwd` (ties: the first in
-    ///    alphabetical order); with none, the group is `<repo name>` itself.
-    /// 5. `<parent>/<name>-worktrees/<wt>…` → `<parent>/<name>` when that is a known folder.
+    ///    alphabetical order); with none, `temporaryFoldersName`.
+    /// 5. Other tool worktrees, a `worktrees` or `<name>-worktrees` folder inside
+    ///    `~/Library/Application Support/<app>/` → `temporaryFoldersName` (rule 2 already moved
+    ///    those whose `.git` file names their repository).
+    /// 6. `<parent>/<name>-worktrees/<wt>…` → `<parent>/<name>` when that is a known folder.
     ///
+    /// A repository found by rules 2–6 that is itself temporary also gives `temporaryFoldersName`.
     /// "Known folders" are the working directories in the history that match none of the path
-    /// rules (2–5), so the answer depends only on the set of directories, not on the order they
+    /// rules (3–6), so the answer depends only on the set of directories, not on the order they
     /// are seen in.
     struct Resolver {
         enum Owner: Equatable {
             case path(String)
-            /// Only the repository's folder name is known.
-            case name(String)
+            case temporary
         }
 
         private let known: [String]
-        private let knownByEncoding: [String: String]
+        private let temporaryRoots: [String]
         private let gitWorktreeRoot: (String) -> String?
 
         init(cwds: some Sequence<String>,
+             temporaryRoots: [String] = ProjectGroup.temporaryRoots,
              gitWorktreeRoot: @escaping (String) -> String? = Resolver.gitWorktreeRoot(of:)) {
-            let known = Set(cwds).filter { Self.pathRule($0) == nil }.sorted()
-            self.known = known
-            var byEncoding: [String: String] = [:]
-            for cwd in known {
-                let key = ClaudeDataService.projectDirName(forCwd: cwd)
-                if byEncoding[key] == nil { byEncoding[key] = cwd }
-            }
-            knownByEncoding = byEncoding
+            known = Set(cwds).filter { Self.pathRule($0) == nil }.sorted()
+            self.temporaryRoots = temporaryRoots
             self.gitWorktreeRoot = gitWorktreeRoot
         }
 
-        /// Group shown in the project ranking for sessions started in `cwd`.
+        /// Group shown in the project ranking and the picker for sessions started in `cwd`.
         func groupName(forCwd cwd: String) -> String {
             switch owner(of: cwd) {
             case .path(let root): return ProjectGroup.groupName(fromRealPath: root)
-            case .name(let name): return name
+            case .temporary: return ProjectGroup.temporaryFoldersName
             case nil: return ProjectGroup.groupName(fromRealPath: cwd)
             }
         }
 
+        /// The project `cwd` belongs to, `.temporary`, or nil when `cwd` is a project folder itself.
         func owner(of cwd: String) -> Owner? {
-            if let repo = gitWorktreeRoot(cwd), repo != cwd { return .path(repo) }
+            if ProjectGroup.isTemporary(cwd, roots: temporaryRoots) { return .temporary }
+            if let repo = gitWorktreeRoot(cwd), repo != cwd { return checked(.path(repo)) }
             switch Self.pathRule(cwd) {
             case nil:
                 return nil
-            case .scratchpad(let encoded):
-                return .path(knownByEncoding[encoded] ?? ProjectGroup.decodePath(encoded))
+            case .scratchpad, .toolWorktree:
+                return .temporary
             case .repo(let root):
-                return .path(root)
+                return checked(.path(root))
             case .parallel(let name):
                 let matches = known.filter { ($0 as NSString).lastPathComponent == name }
                 guard let best = matches.max(by: { a, b in
                     let la = Self.commonPrefixLength(a, cwd), lb = Self.commonPrefixLength(b, cwd)
                     return la != lb ? la < lb : a > b
-                }) else { return .name(name) }
-                return .path(best)
+                }) else { return .temporary }
+                return checked(.path(best))
             case .sibling(let root):
-                return known.contains(root) ? .path(root) : nil
+                return known.contains(root) ? checked(.path(root)) : nil
             }
         }
 
+        private func checked(_ owner: Owner) -> Owner {
+            if case .path(let root) = owner, ProjectGroup.isTemporary(root, roots: temporaryRoots) { return .temporary }
+            return owner
+        }
+
         private enum PathRule: Equatable {
-            case scratchpad(encoded: String)
+            case scratchpad
             case repo(String)
             case parallel(name: String)
+            case toolWorktree
             case sibling(String)
         }
 
@@ -175,14 +221,20 @@ struct ProjectGroup: Identifiable, Hashable {
             for (i, part) in parts.enumerated() where i + 3 < parts.count {
                 if part.hasPrefix("claude-"), part.dropFirst("claude-".count).allSatisfy(\.isNumber),
                    parts[i + 1].hasPrefix("-"), parts[i + 3] == "scratchpad" {
-                    return .scratchpad(encoded: parts[i + 1])
+                    return .scratchpad
                 }
             }
+            // Index of `<app>` in `…/Library/Application Support/<app>/…`.
+            let appIndex = parts.indices.first { $0 > 0 && parts[$0] == "Application Support" && parts[$0 - 1] == "Library" }
+                .map { $0 + 1 }
             for (i, part) in parts.enumerated() where i + 1 < parts.count && !parts[i + 1].isEmpty {
                 if part == ".worktrees", i > 0 { return .repo(join(i)) }
                 if part == "worktrees", i > 1, parts[i - 1] == ".claude" { return .repo(join(i - 1)) }
                 if part == "parallel-worktrees", let name = horusRepoName(parts[i + 1]) {
                     return .parallel(name: name)
+                }
+                if let appIndex, i > appIndex, part == "worktrees" || part.hasSuffix("-worktrees") {
+                    return .toolWorktree
                 }
             }
             for (i, part) in parts.enumerated() where i + 1 < parts.count && !parts[i + 1].isEmpty {
@@ -193,7 +245,7 @@ struct ProjectGroup: Identifiable, Hashable {
             return nil
         }
 
-        /// "carloscostadev-d9470035" → "carloscostadev".
+        /// "site-d9470035" → "site".
         private static func horusRepoName(_ folder: String) -> String? {
             guard let dash = folder.lastIndex(of: "-") else { return nil }
             let suffix = folder[folder.index(after: dash)...]

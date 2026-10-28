@@ -64,22 +64,60 @@ from `~/.claude/`.
 - **Trends tab.** Last-30-days daily cost chart, projected month-end cost and
   prompt-cache savings.
 - **Projects tab.** Top projects by cost (resolved from each session's first
-  `cwd`, not just the encoded folder name; git worktrees, Horus parallel
-  worktrees and Claude Code scratchpads count under their project), plus a
-  weekday × hour heatmap of when you burn the most.
+  `cwd`, not just the encoded folder name; worktrees count under their
+  project and temporary folders as one "Temporary folders" group, see
+  [Project groups](#project-groups)), plus a weekday × hour heatmap of when
+  you burn the most.
 - **Project filter.** A chip in the popover header ("All projects" by
   default) opens a menu of the projects in your history, the same groups as
-  the Projects tab. Picking one filters every number: today's figures and
+  the Projects tab, highest all-time cost first with that estimated cost on
+  the right (`≈ $12.34`). The first 10 are listed directly and the rest under
+  "More"; "Temporary folders", when there is one, is always last. Picking one
+  filters every number: today's figures and
   activity, the periods, models, trends, the ranking and the heatmap. The chip
   stays visible on every tab and turns blue (accent dot and border) while a
   project is selected, so filtered numbers aren't mistaken for the total. The
   choice is remembered between launches; if that project no longer appears
-  in a complete read of the history, the filter goes back to "All projects".
+  in a complete read of the history (for example, a folder that is now part
+  of "Temporary folders"), the filter goes back to "All projects".
   A project without use in a period shows a real `$0.00`, with the usual
   data status notice if a read failed.
 - **Menu bar mark.** Full while Claude Code is working, dimmed while it
   sleeps. No animation, so it costs nothing between state changes.
 - **Launch at login.** Optional, toggled from the popover.
+
+## Project groups
+
+Each session counts under the group of its first `cwd`, resolved against every
+working directory in the history (path rules only, plus one small read of a
+worktree's `.git` file), the same in the Projects tab, the filter and every
+total. The first rule that applies wins:
+
+1. **Temporary folders.** A `cwd` in the temporary directory
+   (`NSTemporaryDirectory()`), `/tmp`, `/var/folders` (or their `/private`
+   forms), or a Claude Code scratchpad (`…/claude-<uid>/<project>/<session>/scratchpad…`),
+   counts under one "Temporary folders" group: test runs and tool sandboxes
+   (`…/T/<name>-<random suffix>`) no longer make one entry each.
+2. **Git worktrees.** A folder whose `.git` file points to
+   `<repo>/.git/worktrees/<name>` counts under `<repo>`, wherever it lives
+   (including tool worktrees in `~/Library/Application Support/<app>/…`).
+3. **Worktrees inside a repository**, `<repo>/.claude/worktrees/<name>` and
+   `<repo>/.worktrees/<name>`, count under `<repo>`.
+4. **Horus worktrees**, `…/parallel-worktrees/<repo name>-<8 hex>/…`, count
+   under the folder of the history named `<repo name>` that shares the longest
+   path with the worktree.
+5. **Other tool worktrees**, a `worktrees` or `<name>-worktrees` folder inside
+   `~/Library/Application Support/<app>/`, whose repository rules 2 and 4
+   couldn't find, count under "Temporary folders" rather than under a name
+   guessed from the folder.
+6. **Sibling worktrees**, `<parent>/<name>-worktrees/<wt>`, count under
+   `<parent>/<name>` when that folder is in the history.
+
+A worktree whose repository is itself a temporary folder is temporary too.
+Every other folder is a project, named after the first folder below
+`Documents/` (`~/Documents/Acme/app` → `Acme`), or its own name outside
+`Documents`. Grouping happens when the per-file sums are added up, so it reads
+no transcript again.
 
 ## How it works
 

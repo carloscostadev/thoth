@@ -183,12 +183,18 @@ struct ScanCorrectnessTests {
         var expected: [String: Double] = [:]
         let perFile = 15
         for (index, file) in history.files.enumerated() {
-            let group = file.cwd.contains("Acme") ? "Acme" : "Internal - Dev"
+            let group = file.cwd.contains("scratchpad") ? ProjectGroup.temporaryFoldersName
+                : file.cwd.contains("Acme") ? "Acme" : "Internal - Dev"
             let requests = history.requests[(index * perFile)..<((index + 1) * perFile)]
             expected[group, default: 0] += requests.reduce(0.0) { $0 + cost($1) }
         }
-        #expect(service.projectRanking.map(\.name) == ["Acme", "Internal - Dev"]
-                || service.projectRanking.map(\.name) == ["Internal - Dev", "Acme"])
+        #expect(Set(service.projectRanking.map(\.name)) == ["Acme", "Internal - Dev", ProjectGroup.temporaryFoldersName])
+        // The picker lists the same groups, with the same all-time costs, temporary folders last.
+        #expect(Set(service.availableProjects.map(\.name)) == Set(service.projectRanking.map(\.name)))
+        #expect(service.availableProjects.last?.name == ProjectGroup.temporaryFoldersName)
+        for entry in service.availableProjects {
+            #expect(abs(entry.cost - expected[entry.name, default: -1]) < 1e-9 * max(entry.cost, 1))
+        }
         for row in service.projectRanking {
             #expect(abs(row.cost - expected[row.name, default: -1]) < 1e-9 * max(row.cost, 1))
         }

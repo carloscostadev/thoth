@@ -27,8 +27,9 @@ final class ClaudeDataService {
     var activeSessions: [SessionData] = []
     var modelUsage = ModelUsageAggregator()
     var burnRateTracker = BurnRateTracker()
-    /// Groups the history's transcripts count under (the project ranking's names), for the picker.
-    var availableProjects: [String] = []
+    /// Groups the history's transcripts count under (the project ranking's names) with their
+    /// all-time cost whatever the filter, for the picker: highest cost first, temporary folders last.
+    var availableProjects: [(name: String, cost: Double)] = []
     /// Project whose numbers are shown; nil = all projects. Set through `applyFilter`.
     private(set) var selectedGroup: String? = nil
     var dateFilter: DateFilter = .allTime
@@ -317,7 +318,7 @@ final class ClaudeDataService {
             failedItems += runFullScanJobs(again, calendar: cal, progress: nil)
         }
 
-        // Worktrees and scratch folders join the project they belong to.
+        // Worktrees join the project they belong to; temporary folders and scratchpads are one group.
         let cwds = Set(fullScanCaches.values.compactMap(\.cwd))
         if cwds.count != cwdGroups.count || !cwds.allSatisfy({ cwdGroups[$0] != nil }) {
             let resolver = ProjectGroup.Resolver(cwds: cwds)
@@ -378,15 +379,18 @@ final class ClaudeDataService {
         let cal = calendar
         let now = clock()
 
-        let available = Set(fullScanCaches.values.map { groupKey(of: $0) })
+        var groupCosts: [String: Double] = [:]
+        for cache in fullScanCaches.values {
+            groupCosts[groupKey(of: cache), default: 0] += cache.totalCost
+        }
         var groupFilter = bgSelectedGroup
         var dropped: String? = nil
-        if let group = groupFilter, bgStatus == .ready, !available.contains(group) {
+        if let group = groupFilter, bgStatus == .ready, groupCosts[group] == nil {
             dropped = group
             groupFilter = nil
             bgSelectedGroup = nil
         }
-        let projects = available.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        let projects = ProjectGroup.menuOrder(groupCosts)
 
         // Each window counts today as its first day, so "7 Days" is today plus the 6 days before
         // (same convention as the 30-day window and chart).
@@ -793,14 +797,16 @@ final class ClaudeDataService {
     /// the filesystem for ambiguous names; the answer is stable per name, so it is cached.
     private func heuristicGroup(forDir dir: String) -> String {
         if let cached = heuristicGroups[dir] { return cached }
-        let name = ProjectGroup.groupName(from: ProjectGroup.decodePath(dir))
+        let name = ProjectGroup.isTemporary(encodedDir: dir)
+            ? ProjectGroup.temporaryFoldersName
+            : ProjectGroup.groupName(from: ProjectGroup.decodePath(dir))
         heuristicGroups[dir] = name
         return name
     }
 
     /// Runs on analyticsQueue. Group a transcript counts under, the same in every scan and in the
-    /// ranking: its session's first cwd resolved against the whole history (worktrees and scratch
-    /// folders join their project), else the folder-name heuristic.
+    /// ranking: its session's first cwd resolved against the whole history (worktrees join their
+    /// project, temporary folders are one group), else the folder-name heuristic.
     private func groupKey(of cache: FullFileCache) -> String {
         cache.cwd.flatMap { cwdGroups[$0] } ?? cache.heuristicGroup
     }

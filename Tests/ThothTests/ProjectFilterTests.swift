@@ -1,4 +1,5 @@
 // Tests/ThothTests/ProjectFilterTests.swift
+import AppKit
 import Foundation
 import Testing
 @testable import Thoth
@@ -58,7 +59,10 @@ struct ProjectFilterTests {
         service.computeTodaySummaries()
         await drainMainQueue()
         #expect(service.selectedGroup == nil)
-        #expect(service.availableProjects == ["Group0", "Group1", "Group2", "Group3", "Group4"])
+        #expect(Set(service.availableProjects.map(\.name)) == ["Group0", "Group1", "Group2", "Group3", "Group4"])
+        // Highest cost first, the same order as the ranking.
+        #expect(service.availableProjects.map(\.name) == service.projectRanking.map(\.name))
+        let menuCosts = service.availableProjects
         let unfilteredCalls = service.allTimeCalls
         let unfilteredToday = service.todayCalls
 
@@ -67,7 +71,7 @@ struct ProjectFilterTests {
         func since(_ days: Int) -> Date { cal.date(byAdding: .day, value: -(days - 1), to: today)! }
 
         var sumOfProjects = 0
-        for group in service.availableProjects {
+        for group in service.availableProjects.map(\.name) {
             await select(group, on: service)
             let expected = requests(of: history, group: group, perFile: perFile)
             #expect(!expected.isEmpty)
@@ -103,8 +107,10 @@ struct ProjectFilterTests {
             // Ranking: only the project shown.
             #expect(service.projectRanking.map(\.name) == [group])
             #expect(service.dataStatus == .ready)
-            // The picker still lists every project.
-            #expect(service.availableProjects.count == 5)
+            // The picker still lists every project, with its all-time cost whatever the filter.
+            #expect(service.availableProjects.map(\.name) == menuCosts.map(\.name))
+            #expect(zip(service.availableProjects, menuCosts).allSatisfy { close($0.cost, $1.cost) })
+            #expect(close(menuCosts.first { $0.name == group }!.cost, service.allTimeCost))
         }
         #expect(sumOfProjects == unfilteredCalls)
 
@@ -171,7 +177,7 @@ struct ProjectFilterTests {
         await drainMainQueue()
         #expect(second.selectedGroup == nil)
         #expect(defaults.string(forKey: ClaudeDataService.projectFilterKey) == nil)
-        #expect(second.availableProjects == ["Group0", "Group2"])
+        #expect(Set(second.availableProjects.map(\.name)) == ["Group0", "Group2"])
         #expect(second.allTimeCalls == 4 * perFile)
         #expect(second.projectRanking.count == 2)
 
@@ -184,6 +190,82 @@ struct ProjectFilterTests {
         #expect(third.selectedGroup == nil)
         #expect(defaults.string(forKey: ClaudeDataService.projectFilterKey) == nil)
         #expect(third.allTimeCalls == 4 * perFile)
+    }
+
+    /// A remembered project whose folder is now part of "Temporary folders" goes back to all
+    /// projects; "Temporary folders" itself can be picked and remembered.
+    @Test func aProjectNowInTemporaryFoldersFallsBack() async throws {
+        var history = try SyntheticHistory(models: Self.models, seed: 43)
+        defer { history.remove() }
+        let perFile = 8
+        try history.generate(projects: 3, filesPerProject: 2, messagesPerFile: perFile, cwds: [
+            "/srv/synthetic/Documents/Acme/app",
+            "/private/var/folders/xx/yy/T/snap-on-AbC123",
+            "/private/tmp/claude-501/-srv-synthetic-Documents-Acme-app/441215ec-fa16-4c61-9222-046e26d390cf/scratchpad",
+        ])
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // The name the picker showed for the first temporary folder before it was grouped.
+        defaults.set("snap-on-AbC123", forKey: ClaudeDataService.projectFilterKey)
+
+        let service = ClaudeDataService(claudeDir: history.root.path, defaults: defaults)
+        #expect(service.selectedGroup == "snap-on-AbC123")
+        service.unifiedFullScan()
+        await drainMainQueue()
+        #expect(service.selectedGroup == nil)
+        #expect(defaults.string(forKey: ClaudeDataService.projectFilterKey) == nil)
+        #expect(service.availableProjects.map(\.name) == ["Acme", ProjectGroup.temporaryFoldersName])
+        #expect(service.allTimeCalls == 6 * perFile)
+
+        await select(ProjectGroup.temporaryFoldersName, on: service)
+        #expect(defaults.string(forKey: ClaudeDataService.projectFilterKey) == ProjectGroup.temporaryFoldersName)
+        #expect(service.allTimeCalls == 4 * perFile)
+        let next = ClaudeDataService(claudeDir: history.root.path, defaults: defaults)
+        next.unifiedFullScan()
+        await drainMainQueue()
+        #expect(next.selectedGroup == ProjectGroup.temporaryFoldersName)
+        #expect(next.allTimeCalls == 4 * perFile)
+    }
+
+    // MARK: - Picker menu
+
+    /// Item names ("—" for a separator); a title with a cost reads "<name>\t≈ $<cost>".
+    private func names(_ menu: NSMenu) -> [String] {
+        menu.items.map { $0.isSeparatorItem ? "—" : String($0.title.split(separator: "\t").first ?? "") }
+    }
+
+    @Test func theMenuShowsTenEntriesThenMoreWithTemporaryFoldersLast() {
+        let temporary = ProjectGroup.temporaryFoldersName
+        let entries = (0..<14).map { ProjectFilterMenu.Entry(name: "Project \($0)", cost: Double(100 - $0)) }
+            + [ProjectFilterMenu.Entry(name: temporary, cost: 500)]
+        var picked: [String?] = []
+        // The items' target is the builder (a weak reference): keep it for the whole test.
+        let built = ProjectFilterMenu(entries: entries, selected: "Project 12") { picked.append($0) }
+        defer { withExtendedLifetime(built) {} }
+        let menu = built.menu
+        #expect(names(menu) == ["All projects", "—"] + (0..<10).map { "Project \($0)" } + ["More"])
+        #expect(menu.items[0].state == .off)
+        let more = try! #require(menu.items.last?.submenu)
+        #expect(menu.items.last?.state == .mixed) // the selected project is inside
+        #expect(names(more) == ["Project 10", "Project 11", "Project 12", "Project 13", "—", temporary])
+        #expect(more.items[2].state == .on)
+        // Costs sit beside the names, marked as estimates.
+        #expect(menu.items[2].attributedTitle?.string == "Project 0\t≈ $100.00")
+        #expect(more.items.last?.attributedTitle?.string == "\(temporary)\t≈ $500.00")
+        // Picking an item reports its project; "All projects" reports nil.
+        for item in [menu.items[0], more.items[3]] {
+            _ = (item.target as AnyObject?)?.perform(item.action, with: item)
+        }
+        #expect(picked == [nil, "Project 13"])
+    }
+
+    @Test func aShortMenuHasNoMore() {
+        let temporary = ProjectGroup.temporaryFoldersName
+        let entries = [ProjectFilterMenu.Entry(name: "Acme", cost: 2), ProjectFilterMenu.Entry(name: temporary, cost: 9)]
+        let menu = ProjectFilterMenu(entries: entries, selected: nil) { _ in }.menu
+        #expect(names(menu) == ["All projects", "—", "Acme", "—", temporary])
+        #expect(menu.items[0].state == .on)
+        #expect(menu.items.allSatisfy { $0.submenu == nil })
     }
 
     // MARK: - Copies shared by several projects

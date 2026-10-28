@@ -8,7 +8,7 @@ struct StatusHeaderView: View {
     let todayTokens: Int
     let todayCalls: Int
     var dataStatus: DataStatus = .ready
-    var projects: [String] = []
+    var projects: [(name: String, cost: Double)] = []
     var selectedProject: String? = nil
     var onSelectProject: (String?) -> Void = { _ in }
 
